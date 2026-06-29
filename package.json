@@ -1,0 +1,35 @@
+{
+  "name": "aside-remote",
+  "version": "0.1.0",
+  "description": "Remote-control your Aside browser agent from chat apps (Telegram for now). Open source, zero runtime dependencies.",
+  "type": "module",
+  "bin": {
+    "aside-remote": "bin/aside-remote.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node bin/aside-remote.js start",
+    "help": "node bin/aside-remote.js help",
+    "test": "ASIDE_REMOTE_HOME=\"${TMPDIR:-/tmp}/aside-remote-test-$$\" node --test --test-concurrency=1 test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "aside",
+    "browser-agent",
+    "telegram",
+    "remote-control",
+    "chatops",
+    "automation"
+  ],
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}

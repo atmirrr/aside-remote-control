@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+.claude/
+
+# Local runtime state (tokens, session map, conversation history) — never commit
+.aside-remote/
+config.json
+sessions.json
+history.json
