@@ -136,7 +136,12 @@ export class Bridge {
         // Default: show just the answer (strip the Thinking/tool transcript) and
         // render its markdown. verbose: forward the raw transcript as plain text.
         let finalText = res.text || '(no output)';
-        if (!verbose) {
+        if (res.stalled || res.code < 0) {
+          // Bridge-synthesized notice (stall / timeout / launch failure): res.text
+          // is already the user-facing message, so show it verbatim instead of
+          // running it through extractAnswer (which would strip it as transcript).
+          finalText = res.text || '(No answer produced.)';
+        } else if (!verbose) {
           const answer = extractAnswer(res.raw || finalText);
           // Coverage signal: empty means no user-facing answer was found (or a
           // format slipped past the filter). Log it so odd cases surface.

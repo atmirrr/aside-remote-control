@@ -105,6 +105,43 @@ test('parseSession: missing regex is treated as disabled', () => {
   assert.equal(a.parseSession('session: abcdef'), null);
 });
 
+// =====================  Agent idle/stall timeout  ==========================
+// A live `aside` agent that blocks on a local approval (writing to memory,
+// editing a file) goes silent with no prompt on stdin, so the bridge would
+// otherwise hang to the 30-min hard cap. The idle timer kills it early.
+test('Agent.run: idle timeout kills a silent-but-alive process and flags it stalled', async () => {
+  const a = new Agent({
+    command: process.execPath, // node
+    wrapper: [],               // spawn directly, no pty wrapper needed for the test
+    // print once, then stay alive forever producing nothing (mimics the wedge)
+    newArgs: ['-e', 'process.stdout.write("working\\n"); setInterval(() => {}, 1000);'],
+    idleTimeoutMs: 1000,
+    timeoutMs: 20000,
+  });
+  const t0 = Date.now();
+  const res = await a.run({ prompt: 'x' });
+  const ms = Date.now() - t0;
+  assert.equal(res.stalled, true);
+  assert.equal(res.code, -3);
+  assert.equal(res.error, true);
+  assert.match(res.text, /went silent/i);
+  assert.ok(ms < 8000, `should stall fast, took ${ms}ms`);
+});
+
+test('Agent.run: idle timeout does not trip a process that finishes promptly', async () => {
+  const a = new Agent({
+    command: process.execPath,
+    wrapper: [],
+    newArgs: ['-e', 'process.stdout.write("hi\\n");'],
+    idleTimeoutMs: 2000,
+    timeoutMs: 20000,
+  });
+  const res = await a.run({ prompt: 'x' });
+  assert.ok(!res.stalled);
+  assert.equal(res.error, false);
+  assert.match(res.text, /hi/);
+});
+
 // =====================  Bridge in-chat commands  ============================
 test('/help returns help text without invoking the agent', async () => {
   resetSessions();
@@ -208,6 +245,24 @@ test('image paths in agent output are sent as images', async () => {
   const ch = makeChannel();
   await bridge.handleMessage(ch, { chatId: '1', text: 'screenshot', from: 'u' });
   assert.deepEqual(ch.images, ['/tmp/shot.png']);
+});
+
+test('a stalled task surfaces the explanatory note verbatim, not the generic fallback', async () => {
+  resetSessions();
+  const note = "[aside-remote] The agent went silent for 120s and looks stuck — most likely it hit a local approval Aside can't grant in remote mode (e.g. writing to memory or editing a file). Run this one in the Aside desktop app, or keep remote tasks read-only.";
+  // raw is a transcript with NO final answer — extractAnswer would yield '' and
+  // the bridge must NOT let that swallow the note.
+  const bridge = makeBridge(async () => ({
+    text: note,
+    raw: "\x1b[2mThinking: update USER.md\x1b[0m\r\nedit_file(path: '/x/USER.md')\r\n",
+    sessionId: null, code: -3, error: true, stalled: true, sessionMissing: false,
+  }));
+  const ch = makeChannel();
+  await bridge.handleMessage(ch, { chatId: '1', text: 'remember my favorite color is blue', from: 'u' });
+  const joined = ch.sentText.join('\n');
+  assert.ok(joined.includes('went silent'), `expected the stall note, got: ${joined}`);
+  assert.ok(joined.includes('Aside desktop app'), 'note should tell the user where to run it');
+  assert.ok(!/No answer produced/.test(joined), 'must not fall back to the generic message');
 });
 
 // =====================  Session self-heal  =================================

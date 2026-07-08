@@ -21,8 +21,15 @@ export class Agent {
   // Runs one task. Resolves with { text, sessionId, code }.
   // timeoutMs overrides the configured hard cap for this call (e.g. the short
   // reply-formatting pass shouldn't inherit the 30-minute task timeout).
-  run({ prompt, sessionId = null, onData, timeoutMs } = {}) {
+  run({ prompt, sessionId = null, onData, timeoutMs, idleTimeoutMs } = {}) {
     const limitMs = timeoutMs ?? this.cfg.timeoutMs ?? 1800000;
+    // Idle/stall cap: kill early if the agent emits no output for this long (0
+    // disables). The agent normally streams "Thinking"/tool-call lines steadily,
+    // so a long dead silence means it's blocked on something we can't answer
+    // remotely — most often a local approval (writing to memory, editing a file)
+    // that Aside gates to its desktop UI with no prompt on stdin. Failing fast
+    // beats hanging to limitMs (the 30-min hard cap).
+    const idleMs = idleTimeoutMs ?? this.cfg.idleTimeoutMs ?? 0;
     const inner = this.buildArgs(prompt, sessionId);
     // Optional wrapper (e.g. ["script","-q","/dev/null"]) gives the agent a
     // pseudo-TTY so it actually renders output we can capture.
@@ -43,25 +50,44 @@ export class Agent {
         return resolve({ text: `Failed to launch agent (${command}): ${e.message}`, sessionId, code: -1, error: true });
       }
 
+      let idleTimer = null;
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
+          clearTimeout(idleTimer);
           try { child.kill('SIGKILL'); } catch {}
           const partial = clean(out);
           resolve({ text: `${partial}\n\n[aside-remote] Task timed out after ${Math.round(limitMs / 1000)}s.`.trim(), sessionId, code: -2, error: true });
         }
       }, limitMs);
 
-      child.stdout?.on('data', (d) => { const s = d.toString(); out += s; onData?.(s); });
-      child.stderr?.on('data', (d) => { err += d.toString(); });
+      // Re-armed on every chunk of output; fires only after idleMs of pure silence.
+      const armIdle = () => {
+        if (!idleMs || settled) return;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { child.kill('SIGKILL'); } catch {}
+          const note = `[aside-remote] The agent went silent for ${Math.round(idleMs / 1000)}s and looks stuck — most likely it hit a local approval Aside can't grant in remote mode (e.g. writing to memory or editing a file). Run this one in the Aside desktop app, or keep remote tasks read-only.`;
+          // text is the user-facing notice; raw keeps the partial transcript for
+          // verbose/debug and history. The bridge shows this verbatim (see below).
+          resolve({ text: note, raw: out, sessionId, code: -3, error: true, stalled: true });
+        }, idleMs);
+      };
+      armIdle();
+
+      child.stdout?.on('data', (d) => { const s = d.toString(); out += s; armIdle(); onData?.(s); });
+      child.stderr?.on('data', (d) => { err += d.toString(); armIdle(); });
       child.on('error', (e) => {
         if (settled) return;
-        settled = true; clearTimeout(timer);
+        settled = true; clearTimeout(timer); clearTimeout(idleTimer);
         resolve({ text: `Agent process error: ${e.message}`, sessionId, code: -1, error: true });
       });
       child.on('close', (code) => {
         if (settled) return;
-        settled = true; clearTimeout(timer);
+        settled = true; clearTimeout(timer); clearTimeout(idleTimer);
         const cleanOut = clean(out);
         const cleanErr = clean(err);
         const newSession = this.parseSession(cleanOut) || this.parseSession(cleanErr) || sessionId;
