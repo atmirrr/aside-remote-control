@@ -29,6 +29,13 @@ const DEFAULT_CONFIG = {
     // stored id is ever rejected, but a bad regex still wastes a retry per turn.
     sessionRegex: null,
     timeoutMs: 1800000,      // 30 min hard cap per task
+    // Idle/stall cap: if the agent streams nothing for this many ms, assume it's
+    // wedged and kill it early with an explanatory reply, instead of hanging to
+    // timeoutMs. This is what catches the common case where the agent blocks on a
+    // local approval (writing to memory, editing a file) that Aside gates to its
+    // desktop UI — there's no prompt on stdin for the bridge to answer, so the
+    // process would otherwise sit silent for the full 30 min. 0 disables.
+    idleTimeoutMs: 120000,   // 2 min of total silence -> treat as stalled
     // Live streaming: edit the chat message in place as the agent produces
     // output, instead of waiting for the full result. Throttled to respect
     // platform edit rate limits. Set stream:false for a single final message.
