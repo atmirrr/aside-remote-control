@@ -36,6 +36,15 @@ CLI output and passes it back on the next message, so context carries over.
    - Send `/newbot`, pick a name and username
    - Copy the token it gives you (looks like `123456789:AAH...`)
 
+## Enabling remote writes
+
+> [!IMPORTANT]
+> ⚠️ **Asking the agent to save to memory or edit a file freezes over the bridge by default** — that's Aside quietly waiting for you to approve the action in its app, which never happens for a remote task.
+>
+> **Fix:** open Aside → **Settings → Permissions → Can edit**. The agent's folder (`~/.aside/u/0/agents/main`) is listed as **Default**, but that doesn't actually work — click **Add** and pick the same folder again. Now saving and editing work.
+
+Read/browse tasks are unaffected.
+
 ## Install
 
 ```bash
@@ -127,7 +136,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   the bridge assumes it's wedged, kills it, and replies with an explanation
   instead of hanging out the full `timeoutMs`. This is what catches the common
   case where the agent blocks on a **local approval** — see
-  [Enabling remote writes](#enabling-remote-writes) below.
+  [Enabling remote writes](#enabling-remote-writes) above.
 - `stream` / `streamThrottleMs`: when `true` (default), the bot sends a
   placeholder and edits it in place as the agent streams output, at most once
   per `streamThrottleMs` (to respect platform edit rate limits). Set
@@ -147,15 +156,6 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
 
 > Tip: tokens live in `config.json`. Keep `~/.aside-remote/` private (the CLI
 > creates it `0700`/`0600`). The repo `.gitignore` already excludes config.
-
-## Enabling remote writes
-
-> [!IMPORTANT]
-> ⚠️ **Asking the agent to save to memory or edit a file freezes over the bridge by default** — that's Aside quietly waiting for you to approve the action in its app, which never happens for a remote task.
->
-> **Fix:** open Aside → **Settings → Permissions → Can edit**. The agent's folder (`~/.aside/u/0/agents/main`) is listed as **Default**, but that doesn't actually work — click **Add** and pick the same folder again. Now saving and editing work.
-
-Read/browse tasks are unaffected, and `idleTimeoutMs` still catches any other stalls (e.g. the agent pausing to ask you a question).
 
 ## Security
 
