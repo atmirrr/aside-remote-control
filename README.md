@@ -39,11 +39,9 @@ CLI output and passes it back on the next message, so context carries over.
 ## Enabling remote writes
 
 > [!IMPORTANT]
-> ⚠️ **Asking the agent to save to memory or edit a file freezes over the bridge by default** — that's Aside quietly waiting for you to approve the action in its app, which never happens for a remote task.
+> ⚠️ Write tasks (updating memory, editing a file) hang over the bridge by default.
 >
-> **Fix:** open Aside → **Settings → Permissions → Can edit**. The agent's folder (`~/.aside/u/0/agents/main`) is listed as **Default**, but that doesn't actually work — click **Add** and pick the same folder again. Now saving and editing work.
-
-Read/browse tasks are unaffected.
+> **Fix:** in Aside → **Settings → Permissions → Can edit**, the agent's folder (`~/.aside/u/0/agents/main`) shows as **Default** but doesn't actually apply — click **Add** and select it again to make it stick.
 
 ## Install
 
