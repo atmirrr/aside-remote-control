@@ -127,7 +127,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   the bridge assumes it's wedged, kills it, and replies with an explanation
   instead of hanging out the full `timeoutMs`. This is what catches the common
   case where the agent blocks on a **local approval** — see
-  [Remote writes hang](#remote-writes-hang-local-approvals) below.
+  [Enabling remote writes](#enabling-remote-writes) below.
 - `stream` / `streamThrottleMs`: when `true` (default), the bot sends a
   placeholder and edits it in place as the agent streams output, at most once
   per `streamThrottleMs` (to respect platform edit rate limits). Set
@@ -148,27 +148,14 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
 > Tip: tokens live in `config.json`. Keep `~/.aside-remote/` private (the CLI
 > creates it `0700`/`0600`). The repo `.gitignore` already excludes config.
 
-## Remote writes hang (local approvals)
+## Enabling remote writes
 
-**Known limitation.** Tasks that only browse/read work great remotely. Tasks that
-make the agent **write** — updating its long-term memory, editing a file — will
-**not complete over the bridge**, and this is not something the bridge can fix.
+> [!IMPORTANT]
+> ⚠️ **Asking the agent to save to memory or edit a file freezes over the bridge by default** — that's Aside quietly waiting for you to approve the action in its app, which never happens for a remote task.
+>
+> **Fix:** open Aside → **Settings → Permissions → Can edit**. The agent's folder (`~/.aside/u/0/agents/main`) is listed as **Default**, but that doesn't actually work — click **Add** and pick the same folder again. Now saving and editing work.
 
-Under the hood, Aside's agent is the Claude Agent SDK (`provider: claude-code`).
-Write tools are gated by a permission check that Aside resolves in its **desktop
-UI**. Running headless via `aside` (what the bridge does), that permission request
-surfaces **nowhere** — no prompt on stdin, nothing in stdout, no daemon event —
-so the tool call silently deadlocks. There is no flag, env var, settings key, MCP
-capability, or API to grant it from outside Aside (all verified against the CLI
-binary). Only Aside can fix this, by exposing a permission mode (e.g. an
-`--permission-mode`/auto-approve flag) on `aside exec`.
-
-What the bridge does about it: `idleTimeoutMs` detects the stall and replies with
-a clear message ("…hit a local approval Aside can't grant in remote mode… run
-this one in the Aside desktop app") instead of hanging for the full `timeoutMs`.
-
-Practical guidance: keep remote tasks read-only/browsing; run memory- or
-file-writing tasks in the Aside desktop app.
+Read/browse tasks are unaffected, and `idleTimeoutMs` still catches any other stalls (e.g. the agent pausing to ask you a question).
 
 ## Security
 
@@ -193,7 +180,7 @@ against the `Channel` interface, so no other file needs changes.
 
 - Approval handling — the bridge now **detects the stall** (`idleTimeoutMs`) and
   replies with an explanation instead of hanging (see
-  [Remote writes hang](#remote-writes-hang-local-approvals)). A true in-chat
+  [Enabling remote writes](#enabling-remote-writes)). A true in-chat
   approve/deny isn't possible until Aside exposes a headless permission mode on
   `aside exec` — the request currently surfaces nowhere the bridge can see it.
 - `/cancel` — stop a running task without waiting for the timeout.
