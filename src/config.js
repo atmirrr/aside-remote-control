@@ -54,6 +54,37 @@ const DEFAULT_CONFIG = {
     context: true,
     contextMaxChars: 2000,
   },
+  // Speech-to-text for incoming voice notes. Any OpenAI-compatible
+  // /audio/transcriptions endpoint works — override baseUrl to point at Groq or
+  // a local whisper server. The key is read from the environment by default, so
+  // it never has to be written to disk. Without a key, voice notes get a setup
+  // hint instead of a transcript; everything else keeps working.
+  voice: {
+    enabled: true,
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'whisper-1',
+    apiKey: null,               // takes precedence over apiKeyEnv
+    apiKeyEnv: 'OPENAI_API_KEY',
+    language: null,             // ISO-639-1 hint, e.g. "en". null = auto-detect.
+    timeoutMs: 120000,
+    // Echo what was heard back into the chat before running the task, so a
+    // mistranscription is obvious rather than silently acted on.
+    echoTranscript: true,
+  },
+  // Incoming files (photos, documents, video). They're downloaded next to the
+  // bridge's other state and their paths are handed to the agent, which opens
+  // them with its own file tools.
+  attachments: {
+    enabled: true,
+    // Telegram's Bot API refuses to serve downloads above 20 MB, so this is the
+    // effective ceiling regardless. Lower it to be stricter.
+    maxBytes: 20 * 1024 * 1024,
+    // Where downloads land. null = <ASIDE_REMOTE_HOME>/attachments. Aside must
+    // have *read* permission here or the agent hangs on a desktop approval when
+    // it opens the file; pointing this inside Aside's own agent folder (e.g.
+    // "~/.aside/u/0/agents/main/inbox") sidesteps the grant entirely.
+    dir: null,
+  },
   channels: [],
 };
 
@@ -84,6 +115,8 @@ export function loadConfig() {
     ...structuredClone(DEFAULT_CONFIG),
     ...cfg,
     agent: { ...DEFAULT_CONFIG.agent, ...(cfg.agent || {}) },
+    voice: { ...DEFAULT_CONFIG.voice, ...(cfg.voice || {}) },
+    attachments: { ...DEFAULT_CONFIG.attachments, ...(cfg.attachments || {}) },
     channels: cfg.channels || [],
   };
 }
@@ -94,6 +127,21 @@ export function saveConfig(cfg) {
 
 export function configPath() {
   return CONFIG_PATH;
+}
+
+// Where a chat's incoming files are written: namespaced per chat, so two chats
+// can't collide or read each other's uploads. Both segments are
+// attacker-influenced, hence the scrub.
+//
+// baseDir overrides the default (`attachments.dir` in config). It exists because
+// the agent must be able to *read* these files, and Aside gates reads outside
+// its permitted folders behind a desktop approval the bridge cannot answer —
+// pointing this at a folder Aside already trusts avoids that entirely.
+const safeSegment = (s) => String(s).replace(/[^\w.\-]+/g, '_');
+const expandHome = (p) => p.replace(/^~(?=$|\/)/, os.homedir());
+export function attachmentsDir(channelId, chatId, baseDir) {
+  const base = baseDir ? expandHome(String(baseDir)) : path.join(HOME, 'attachments');
+  return path.join(base, safeSegment(channelId), safeSegment(chatId));
 }
 
 // ---- per-chat session map (channelId:chatId -> agent session id) ----

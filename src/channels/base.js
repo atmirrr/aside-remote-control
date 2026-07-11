@@ -24,8 +24,15 @@ export class Channel {
     return allow.map(String).includes(String(chatId));
   }
 
-  // Begin receiving. Call onMessage({ chatId, text, messageId, from }) per message.
-  // Must stop cleanly when signal.aborted becomes true.
+  // Begin receiving. Call onMessage({ chatId, text, messageId, from, attachments })
+  // per message. Must stop cleanly when signal.aborted becomes true.
+  //
+  // `attachments` (optional, default []) describes any files the message carried:
+  //   { kind, name, mimeType, size, durationSec, download(destDir, prefix) }
+  // where kind is one of voice | audio | video_note | photo | document | video.
+  // download() must fetch the bytes and resolve with a local path. Keep it lazy:
+  // the bridge only calls it once the chat has passed isAuthorized(), so an
+  // unauthorized sender can never make the bridge fetch or store their files.
   async start(/* { onMessage, signal } */) {
     throw new Error('start() not implemented');
   }

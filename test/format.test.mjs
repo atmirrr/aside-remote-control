@@ -133,3 +133,13 @@ test('sendOne sends plain (one call) when markdown is off', async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].parse_mode, undefined);
 });
+
+// The CLI prints an update banner on stdout, un-dimmed, so it survived the
+// colour filter and appeared above every answer in the chat. Seen live.
+test('extractAnswer strips the CLI update banner', () => {
+  const raw = 'Aside CLI 1.26.709.1533 is available \x1b[2m(current 1.26.706.1553). Run: aside --update\x1b[0m\r\n4\r\n';
+  assert.equal(extractAnswer(raw), '4');
+});
+test('extractAnswer keeps an answer that merely mentions availability', () => {
+  assert.equal(extractAnswer('The room is available tomorrow.'), 'The room is available tomorrow.');
+});

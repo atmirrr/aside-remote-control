@@ -1,11 +1,18 @@
 // Telegram channel: long-polling getUpdates, no webhook / public URL needed.
-import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Channel } from './base.js';
-import { httpsJson, log, sleep, mdToTelegramHtml } from '../util.js';
+import { httpsJson, httpsGetBuffer, multipartPost, sanitizeFilename, log, sleep, mdToTelegramHtml } from '../util.js';
 
 const API = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
+const FILE_URL = (token, remotePath) => `https://api.telegram.org/file/bot${token}/${remotePath}`;
+
+// Telegram's Bot API will not serve a download above 20 MB, whatever we ask for.
+const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+// An album (several photos sent at once) arrives as one update per file, tied
+// together by media_group_id. Wait this long for the rest of the group before
+// handing it over, so an album becomes one agent task instead of N.
+const MEDIA_GROUP_WINDOW_MS = 1500;
 
 export class TelegramChannel extends Channel {
   static type = 'telegram';
@@ -15,6 +22,8 @@ export class TelegramChannel extends Channel {
     super(cfg);
     this.token = cfg.token;
     this.offset = 0;
+    this.mediaGroups = new Map(); // media_group_id -> { attachments, timer, ... }
+    this.lastPollError = null;    // dedupes the poll-failure warning
   }
 
   async call(method, params = {}) {
@@ -109,15 +118,40 @@ export class TelegramChannel extends Channel {
       try {
         const r = await this.call('getUpdates', { offset: this.offset, timeout: 30 });
         backoff = 1000;
-        if (!r?.ok) { await sleep(2000); continue; }
+        if (!r?.ok) {
+          // Telegram hands each update to exactly one getUpdates caller, so a
+          // second bridge on the same token starves this one. Retrying in
+          // silence makes that look like "the bot just ignores me" — say it out
+          // loud, but only when the reason changes, or it repeats every 2s.
+          const why = r?.description || 'unknown error';
+          if (why !== this.lastPollError) {
+            log.warn(`[${this.id}] getUpdates rejected: ${why}`);
+            if (/conflict/i.test(why)) {
+              log.warn(`[${this.id}] another process is polling this bot token. Stop it, or updates will go to whichever instance wins the race.`);
+            }
+            this.lastPollError = why;
+          }
+          await sleep(2000);
+          continue;
+        }
+        this.lastPollError = null;
         for (const u of r.result) {
           this.offset = u.update_id + 1;
           const msg = u.message || u.edited_message;
-          const text = msg?.text;
-          if (!msg || !text) continue;
+          if (!msg) continue;
+          // A file-bearing message carries its text in `caption`, not `text`.
+          const text = msg.text || msg.caption || '';
+          const attachments = this.attachmentsOf(msg);
+          if (!text && !attachments.length) continue; // stickers, joins, pins, ...
+
+          if (msg.media_group_id && attachments.length) {
+            this.bufferAlbum(msg, text, attachments, onMessage);
+            continue;
+          }
           await onMessage({
             chatId: msg.chat.id,
             text,
+            attachments,
             messageId: msg.message_id,
             from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
           });
@@ -129,6 +163,74 @@ export class TelegramChannel extends Channel {
         backoff = Math.min(backoff * 2, 30000);
       }
     }
+    // Drop any album still waiting for its remaining parts.
+    for (const g of this.mediaGroups.values()) clearTimeout(g.timer);
+    this.mediaGroups.clear();
+  }
+
+  // Collect the parts of one album, then emit them as a single message. Only one
+  // part of an album carries the caption, so keep the first one we see.
+  bufferAlbum(msg, text, attachments, onMessage) {
+    const id = msg.media_group_id;
+    const group = this.mediaGroups.get(id) || {
+      chatId: msg.chat.id,
+      messageId: msg.message_id,
+      from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
+      text: '',
+      attachments: [],
+      timer: null,
+    };
+    group.attachments.push(...attachments);
+    if (!group.text && text) group.text = text;
+    clearTimeout(group.timer);
+    group.timer = setTimeout(() => {
+      this.mediaGroups.delete(id);
+      const { timer, ...message } = group;
+      // Fired from a timer, outside the poll loop's try/catch: swallow failures
+      // here or an album error would become an unhandled rejection.
+      Promise.resolve(onMessage(message)).catch((e) => log.warn(`[${this.id}] album failed: ${e.message}`));
+    }, MEDIA_GROUP_WINDOW_MS);
+    this.mediaGroups.set(id, group);
+  }
+
+  // Describe a message's files as channel-neutral attachment specs. Nothing is
+  // fetched here: download() is called by the bridge only after the chat clears
+  // authorization, so an unauthorized sender can never make us pull bytes.
+  attachmentsOf(msg) {
+    const specs = [];
+    const push = (kind, file, extra = {}) => {
+      if (file) specs.push({ kind, fileId: file.file_id, size: file.file_size, mimeType: file.mime_type, ...extra });
+    };
+    push('voice', msg.voice, { name: 'voice', mimeType: msg.voice?.mime_type || 'audio/ogg', durationSec: msg.voice?.duration });
+    push('video_note', msg.video_note, { name: 'video-note', mimeType: 'video/mp4', durationSec: msg.video_note?.duration });
+    push('audio', msg.audio, { name: msg.audio?.file_name || msg.audio?.title || 'audio', durationSec: msg.audio?.duration });
+    if (msg.photo?.length) {
+      // `photo` is the same image at several resolutions, ascending. Take the best.
+      const largest = msg.photo[msg.photo.length - 1];
+      specs.push({ kind: 'photo', fileId: largest.file_id, size: largest.file_size, mimeType: 'image/jpeg', name: 'photo.jpg' });
+    }
+    push('document', msg.document, { name: msg.document?.file_name || 'document' });
+    push('video', msg.video, { name: msg.video?.file_name || 'video.mp4', durationSec: msg.video?.duration });
+    return specs.map((spec) => ({ ...spec, download: (dir, prefix) => this.downloadFile(spec, dir, prefix) }));
+  }
+
+  // Resolve a file_id to bytes and write them under destDir. Returns the path.
+  async downloadFile(spec, destDir, prefix = '') {
+    const r = await this.call('getFile', { file_id: spec.fileId });
+    if (!r?.ok) throw new Error(r?.description || 'Telegram would not hand over that file');
+    const remote = r.result.file_path; // e.g. "voice/file_12.oga"
+    const buf = await httpsGetBuffer(FILE_URL(this.token, remote), { maxBytes: MAX_DOWNLOAD_BYTES });
+
+    // Telegram resolves an extension even when the client sent no usable name,
+    // and both the agent's file tools and the transcriber key off it.
+    let name = sanitizeFilename(spec.name || spec.kind, spec.kind);
+    const ext = path.extname(remote);
+    if (ext && !path.extname(name)) name += ext;
+
+    fs.mkdirSync(destDir, { recursive: true, mode: 0o700 });
+    const dest = path.join(destDir, prefix ? `${sanitizeFilename(prefix, 'msg')}-${name}` : name);
+    fs.writeFileSync(dest, buf, { mode: 0o600 });
+    return dest;
   }
 
   async sendTyping(chatId) {
@@ -177,43 +279,10 @@ export class TelegramChannel extends Channel {
 
   async sendImage(chatId, filePath, caption = '') {
     if (!fs.existsSync(filePath)) return false;
-    const buf = fs.readFileSync(filePath);
-    const filename = path.basename(filePath);
-    await this.multipartPhoto(chatId, buf, filename, caption);
-    return true;
-  }
-
-  // Minimal multipart/form-data POST for sendPhoto (no deps).
-  multipartPhoto(chatId, buffer, filename, caption) {
-    return new Promise((resolve, reject) => {
-      const boundary = `----asideremote${Date.now().toString(16)}`;
-      const pre = [];
-      const field = (name, value) =>
-        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
-      pre.push(field('chat_id', String(chatId)));
-      if (caption) pre.push(field('caption', caption.slice(0, 1000)));
-      pre.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\n` +
-        `Content-Type: application/octet-stream\r\n\r\n`
-      );
-      const head = Buffer.from(pre.join(''), 'utf8');
-      const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
-      const body = Buffer.concat([head, buffer, tail]);
-
-      const req = https.request(API(this.token, 'sendPhoto'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-        },
-      }, (res) => {
-        const chunks = [];
-        res.on('data', (d) => chunks.push(d));
-        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-      });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
+    await multipartPost(API(this.token, 'sendPhoto'), {
+      fields: { chat_id: String(chatId), ...(caption ? { caption: caption.slice(0, 1000) } : {}) },
+      files: [{ field: 'photo', filename: path.basename(filePath), buffer: fs.readFileSync(filePath) }],
     });
+    return true;
   }
 }

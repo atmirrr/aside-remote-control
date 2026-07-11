@@ -1,6 +1,9 @@
 // Small zero-dependency helpers: terminal IO, HTTP(S), text utilities.
 import readline from 'node:readline';
 import https from 'node:https';
+import http from 'node:http';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { URL } from 'node:url';
 
 const COLORS = {
@@ -83,6 +86,117 @@ export function httpsJson(urlStr, { method = 'GET', body, headers = {}, timeoutM
   });
 }
 
+// Download a URL into memory, refusing anything over maxBytes. Chat-platform
+// downloads are small by construction (Telegram caps bot downloads at 20 MB),
+// so buffering keeps both the size guard and the multipart re-upload trivial.
+export function httpsGetBuffer(urlStr, { timeoutMs = 120000, maxBytes = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(urlStr, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume(); // drain, else the socket is held open
+        return reject(new Error(`Download failed (HTTP ${res.statusCode})`));
+      }
+      const chunks = [];
+      let received = 0;
+      res.on('data', (d) => {
+        received += d.length;
+        if (maxBytes && received > maxBytes) {
+          req.destroy();
+          return reject(new Error(`File is larger than ${formatBytes(maxBytes)}`));
+        }
+        chunks.push(d);
+      });
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Download timed out after ${timeoutMs}ms`)));
+  });
+}
+
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+// multipart/form-data POST with no dependencies. Used for both Telegram's
+// sendPhoto and the speech-to-text upload. Returns { ok, status, data } like
+// httpsJson. Field values and filenames land inside MIME headers, so both are
+// sanitized: a filename with a CRLF in it would otherwise forge headers.
+//
+// http:// is honoured so a self-hosted whisper on localhost needs no TLS, but
+// only for loopback: everything else would put an Authorization header and the
+// user's audio on the wire in the clear.
+export function multipartPost(urlStr, { fields = {}, files = [], headers = {}, timeoutMs = 120000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const plaintext = u.protocol === 'http:';
+    if (plaintext && !LOOPBACK.has(u.hostname)) {
+      return reject(new Error(`refusing to POST credentials over plain http to ${u.hostname} — use https, or a loopback address`));
+    }
+    const transport = plaintext ? http : https;
+    const boundary = `----asideremote${randomBytes(12).toString('hex')}`;
+    const parts = [];
+    for (const [name, value] of Object.entries(fields)) {
+      if (value == null) continue;
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
+    }
+    for (const f of files) {
+      const type = String(f.contentType || 'application/octet-stream').replace(/[^\w.+/-]/g, '');
+      parts.push(Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${f.field}"; filename="${sanitizeFilename(f.filename)}"\r\n` +
+        `Content-Type: ${type || 'application/octet-stream'}\r\n\r\n`, 'utf8'));
+      parts.push(f.buffer);
+      parts.push(Buffer.from('\r\n', 'utf8'));
+    }
+    parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+    const body = Buffer.concat(parts);
+
+    const req = transport.request({
+      method: 'POST',
+      hostname: u.hostname,
+      port: u.port || (plaintext ? 80 : 443),
+      path: u.pathname + u.search,
+      headers: {
+        Accept: 'application/json',
+        ...headers,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (d) => chunks.push(d));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, data });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Request timed out after ${timeoutMs}ms`)));
+    req.write(body);
+    req.end();
+  });
+}
+
+// Reduce an untrusted name (chat clients let you send "../../.ssh/authorized_keys")
+// to a single safe path segment.
+export function sanitizeFilename(name, fallback = 'file') {
+  const base = path.basename(String(name ?? ''))
+    .replace(/[^\w.\-]+/g, '_')
+    .replace(/^[._]+/, '')
+    .slice(0, 80);
+  return base || fallback;
+}
+
+export function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return 'unknown size';
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
 // Split a long string into <=size pieces, trying not to cut mid-line.
 export function chunkText(text, size = 3800) {
   if (text.length <= size) return [text];
@@ -129,6 +243,9 @@ export function sleep(ms) {
 // Also accepts already-cleaned text (no colours) and line-filters best-effort.
 const CLOSES_CALL = /\)\s*(\[[^\]]*\])?\s*$/;       // `…)` or `…) [toolu_id]`
 const TOOL_CALL = /^[\w.]+\s*\(/;                    // bash(, read_file(, repl(, gmail.search(
+// The CLI prints its own update banner on stdout, un-dimmed, so it survives the
+// colour filter and lands in the chat above the answer.
+const CLI_NOTICE = /^Aside CLI\b.*\bis available\b|^Run: aside --update\b/i;
 const ARIA_NODE = /^-\s+(title|heading|text|paragraph|link|button|generic|image|img|list|listitem|combobox|textbox|checkbox|radio|tab|tabpanel|menu|menuitem|menubar|dialog|alertdialog|banner|navigation|main|region|article|form|table|row|cell|columnheader|rowheader|separator|status|note|alert|figure|code|blockquote|group|toolbar|tooltip|switch|slider|progressbar|searchbox|option|complementary|contentinfo|caption|document)\b/i;
 export function extractAnswer(rawOrText) {
   if (!rawOrText) return '';
@@ -142,6 +259,7 @@ export function extractAnswer(rawOrText) {
     const t = line.trim();
     if (inCall) { if (CLOSES_CALL.test(t)) inCall = false; continue; }
     if (!t) { kept.push(''); continue; }
+    if (CLI_NOTICE.test(t)) continue;
     if (/^Thinking:/i.test(t)) continue;
     if (TOOL_CALL.test(t)) { if (!CLOSES_CALL.test(t)) inCall = true; continue; }
     if (/^>/.test(t)) continue;                              // tool output marker
