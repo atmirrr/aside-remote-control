@@ -1,11 +1,14 @@
 // The bridge wires channels -> agent -> channels.
 // Messages from one chat are processed in order (a per-chat queue) so the
 // agent session stays consistent and tasks don't overlap.
+import fs from 'node:fs';
+import path from 'node:path';
 import { Agent } from './agent.js';
 import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
-import { sessions, history } from './config.js';
-import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer } from './util.js';
+import { sessions, history, attachmentsDir } from './config.js';
+import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
+import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
 
 // Flatten recent turns into the single prompt string the CLI accepts, so
 // follow-ups keep context. The Aside CLI has no structured messages array (the
@@ -23,10 +26,34 @@ function buildPrompt(prior, text) {
   return parts.join('\n\n');
 }
 
+// Kinds that are somebody talking. Voice notes and round video notes always are.
+// A forwarded audio file is too — and either way the browser agent has no way to
+// listen to a file, so transcribing is the only thing that makes it useful.
+const SPEECH_KINDS = new Set(['voice', 'audio', 'video_note']);
+const isSpeech = (a) => SPEECH_KINDS.has(a.kind);
+
+const NO_MESSAGE = 'The user sent the attached file(s) with no message.';
+
+function describeFiles(files) {
+  if (!files.length) return '';
+  const lines = files.map((f) => `- ${f.path} (${f.mimeType || 'unknown type'}, ${formatBytes(f.size)})`);
+  return `Attached files, saved on this machine — open them with your file tools:\n${lines.join('\n')}`;
+}
+
+// A message can carry typed text, speech, files, or any mix of the three. The
+// CLI takes one string, so flatten: what was typed, then what was said, then
+// where the files landed.
+function composeMessage(text, transcript, files) {
+  const body = [text?.trim(), transcript?.trim()].filter(Boolean).join('\n\n');
+  return [body || NO_MESSAGE, describeFiles(files)].filter(Boolean).join('\n\n');
+}
+
 const HELP = [
   'Aside Remote Control',
   '',
   'Just send a message and I will run it as a task in the Aside browser.',
+  'Send a voice note and I will transcribe it first. Attach photos or files and',
+  'I will hand them to the agent.',
   '',
   'Commands:',
   '  /new      start a fresh agent session (forget context)',
@@ -39,6 +66,7 @@ export class Bridge {
   constructor(config) {
     this.config = config;
     this.agent = new Agent(config.agent);
+    this.transcribe = transcribe; // swappable for tests
     this.queues = new Map(); // chatId -> Promise chain
     this.controller = new AbortController();
   }
@@ -50,14 +78,67 @@ export class Bridge {
     return next;
   }
 
-  async handleMessage(channel, { chatId, text, from }) {
+  // Fetch a message's files and turn any speech into text. Called only after the
+  // chat has passed authorization, so an unauthorized sender can never make the
+  // bridge download or store their files. Resolves to { files, transcript }, or
+  // { error } with a message to show the user verbatim.
+  async prepareAttachments(channel, chatId, messageId, attachments) {
+    const voiceCfg = this.config.voice || {};
+    const hasSpeech = attachments.some(isSpeech);
+    const hasFiles = attachments.some((a) => !isSpeech(a));
+
+    // Every refusal below happens before the first byte is fetched.
+    if (hasFiles && this.config.attachments?.enabled === false) {
+      return { error: 'File attachments are disabled on this bridge.' };
+    }
+    if (hasSpeech && voiceCfg.enabled === false) {
+      return { error: 'Voice messages are disabled on this bridge.' };
+    }
+    // No point pulling audio down when nothing can read it back to us.
+    if (hasSpeech && !isTranscriptionConfigured(voiceCfg)) return { error: VOICE_SETUP_HINT };
+
+    const dir = attachmentsDir(channel.id, chatId, this.config.attachments?.dir);
+    const files = [];
+    const spoken = [];
+
+    for (const [i, a] of attachments.entries()) {
+      let filePath;
+      try {
+        filePath = await a.download(dir, `${messageId}-${i}`);
+      } catch (e) {
+        return { error: `Couldn't download the ${a.kind} you sent: ${e.message}` };
+      }
+      if (!isSpeech(a)) {
+        files.push({ path: filePath, mimeType: a.mimeType, size: a.size });
+        continue;
+      }
+      try {
+        const text = await this.transcribe(filePath, voiceCfg, a.mimeType);
+        if (text) spoken.push(text);
+      } catch (e) {
+        return { error: `Couldn't transcribe the ${a.kind} you sent: ${e.message}` };
+      } finally {
+        // The audio has done its job. Don't leave recordings of the user lying
+        // around; the transcript is what carries forward.
+        await fs.promises.rm(filePath, { force: true }).catch(() => {});
+      }
+    }
+
+    if (hasSpeech && !spoken.length && !files.length) {
+      return { error: "I couldn't make out any speech in that — try again?" };
+    }
+    return { files, transcript: spoken.join('\n\n') };
+  }
+
+  async handleMessage(channel, { chatId, text = '', attachments = [], messageId, from }) {
     if (!channel.isAuthorized(chatId)) {
       log.warn(`[${channel.id}] blocked unauthorized chat ${chatId} (${from})`);
       await channel.sendText(chatId, `Not authorized. Your chat id is ${chatId}. Ask the operator to allow it.`);
       return;
     }
 
-    const cmd = text.trim().toLowerCase();
+    // Commands are typed, never captioned onto a file.
+    const cmd = attachments.length ? '' : text.trim().toLowerCase();
     if (cmd === '/help' || cmd === '/start') return channel.sendText(chatId, HELP);
     if (cmd === '/whoami') return channel.sendText(chatId, `chat id: ${chatId}\nusername: ${from}`);
     if (cmd === '/status') {
@@ -72,53 +153,80 @@ export class Bridge {
 
     // Real task -> run in order for this chat.
     return this.enqueue(chatId, async () => {
-      const sid = sessions.get(channel.id, chatId);
       const started = Date.now();
-      log.info(`[${channel.id}] (${from}) task${sid ? ` [${sid}]` : ' [new]'}: ${text.slice(0, 120)}`);
       await channel.sendTyping(chatId);
-
-      // Stream by editing one message in place, when the channel supports it.
-      const wantStream = this.config.agent?.stream !== false
-        && typeof channel.editText === 'function'
-        && channel.editText !== Channel.prototype.editText;
-      const throttle = this.config.agent?.streamThrottleMs ?? 1800;
-      const placeholder = '🧠 Thinking...';
-      const msgId = await channel.sendText(chatId, placeholder).catch(() => undefined);
-      const streaming = wantStream && msgId != null;
-
-      const verbose = this.config.agent?.verbose === true;
-      // Conversation continuity: prepend recent turns as context (client-side).
-      const useContext = this.config.agent?.context !== false;
-      const ctxMax = this.config.agent?.contextMaxChars ?? 2000;
-      const prompt = useContext ? buildPrompt(history.get(channel.id, chatId), text) : text;
+      // Downloading and transcribing happen before the agent starts, and can take
+      // a few seconds, so keep the indicator alive from here rather than later.
       const keepTyping = setInterval(() => channel.sendTyping(chatId).catch(() => {}), 6000);
 
-      // Live-edit state: accumulate raw output, push the latest tail on a timer.
-      let acc = '';
-      let lastShown = placeholder;
+      // Declared up front so the catch/finally below can always reach them,
+      // whatever stage the task got to.
+      let msgId;
+      let streaming = false;
       let flushTimer = null;
+      let lastShown = '';
       let editing = false;
-      let editCount = 0;
-      // Progress view: the raw transcript tail when verbose, else the cleaned
-      // answer-so-far (which stays empty while the agent is doing tool work).
-      const renderPartial = () => {
-        const view = verbose ? cleanTerminalOutput(acc) : extractAnswer(acc);
-        return view.slice(-3500).trim();
-      };
-      const pushEdit = async (textToShow) => {
-        if (editing) return;
-        const t = (textToShow ?? renderPartial());
-        if (!t || t === lastShown) return;
-        editing = true;
-        try { await channel.editText(chatId, msgId, t); lastShown = t; editCount++; } catch {} finally { editing = false; }
-      };
-      const onData = streaming ? (chunk) => {
-        acc += chunk;
-        if (flushTimer) return;
-        flushTimer = setTimeout(() => { flushTimer = null; pushEdit(); }, throttle);
-      } : undefined;
 
       try {
+        let files = [];
+        let transcript = '';
+        if (attachments.length) {
+          const prepared = await this.prepareAttachments(channel, chatId, messageId, attachments);
+          if (prepared.error) {
+            await channel.sendText(chatId, prepared.error);
+            return;
+          }
+          ({ files, transcript } = prepared);
+          log.info(`[${channel.id}] (${from}) attachments: ${attachments.map((a) => a.kind).join(', ')}`);
+          // Show what was heard before acting on it, so a mistranscription is
+          // visible rather than silently obeyed.
+          if (transcript && this.config.voice?.echoTranscript !== false) {
+            await channel.sendText(chatId, `🎙️ ${transcript}`);
+          }
+        }
+        const messageText = composeMessage(text, transcript, files);
+
+        const sid = sessions.get(channel.id, chatId);
+        log.info(`[${channel.id}] (${from}) task${sid ? ` [${sid}]` : ' [new]'}: ${messageText.slice(0, 120)}`);
+
+        // Stream by editing one message in place, when the channel supports it.
+        const wantStream = this.config.agent?.stream !== false
+          && typeof channel.editText === 'function'
+          && channel.editText !== Channel.prototype.editText;
+        const throttle = this.config.agent?.streamThrottleMs ?? 1800;
+        const placeholder = '🧠 Thinking...';
+        msgId = await channel.sendText(chatId, placeholder).catch(() => undefined);
+        streaming = wantStream && msgId != null;
+        lastShown = placeholder;
+
+        const verbose = this.config.agent?.verbose === true;
+        // Conversation continuity: prepend recent turns as context (client-side).
+        const useContext = this.config.agent?.context !== false;
+        const ctxMax = this.config.agent?.contextMaxChars ?? 2000;
+        const prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
+
+        // Live-edit state: accumulate raw output, push the latest tail on a timer.
+        let acc = '';
+        let editCount = 0;
+        // Progress view: the raw transcript tail when verbose, else the cleaned
+        // answer-so-far (which stays empty while the agent is doing tool work).
+        const renderPartial = () => {
+          const view = verbose ? cleanTerminalOutput(acc) : extractAnswer(acc);
+          return view.slice(-3500).trim();
+        };
+        const pushEdit = async (textToShow) => {
+          if (editing) return;
+          const t = (textToShow ?? renderPartial());
+          if (!t || t === lastShown) return;
+          editing = true;
+          try { await channel.editText(chatId, msgId, t); lastShown = t; editCount++; } catch {} finally { editing = false; }
+        };
+        const onData = streaming ? (chunk) => {
+          acc += chunk;
+          if (flushTimer) return;
+          flushTimer = setTimeout(() => { flushTimer = null; pushEdit(); }, throttle);
+        } : undefined;
+
         let res = await this.agent.run({ prompt, sessionId: sid, onData });
         // Self-heal: if the stored session id was rejected (expired/unknown/bad),
         // forget it and retry once as a fresh session instead of failing forever.
@@ -141,6 +249,12 @@ export class Bridge {
           // is already the user-facing message, so show it verbatim instead of
           // running it through extractAnswer (which would strip it as transcript).
           finalText = res.text || '(No answer produced.)';
+          // A stall on a task with files is almost never the generic memory/edit
+          // approval the notice describes — it's the agent blocking on read
+          // permission for the attachment. Name the actual directory.
+          if (res.stalled && files.length) {
+            finalText += `\n\nThis task had attached files. Aside also needs read access to ${path.dirname(files[0].path)} — grant it in Settings → Permissions → Can read, or set "attachments.dir" to a folder Aside already reads.`;
+          }
         } else if (!verbose) {
           const answer = extractAnswer(res.raw || finalText);
           // Coverage signal: empty means no user-facing answer was found (or a
@@ -162,10 +276,12 @@ export class Bridge {
         } else {
           await channel.sendText(chatId, finalText, opts);
         }
-        // Remember this exchange (the clean answer, not the raw transcript) so
-        // the next message can resolve follow-up references.
+        // Remember this exchange (the clean answer, not the raw transcript) so the
+        // next message can resolve follow-up references. Store the composed text,
+        // not the raw one: for a voice note that's the transcript, and for files
+        // it's their paths — so "summarize that pdf again" still resolves.
         if (useContext) {
-          history.append(channel.id, chatId, 'user', text, ctxMax);
+          history.append(channel.id, chatId, 'user', messageText, ctxMax);
           const cleanAnswer = extractAnswer(res.raw || res.text || '');
           if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
         }

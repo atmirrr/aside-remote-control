@@ -6,6 +6,8 @@ Remote-control your [Aside](https://aside.com) browser agent from chat apps. Sen
 - No webhook, no public URL, no hosted backend. Pure long-polling.
 - Live streaming: the reply updates in place as the agent works.
 - Clean replies: just the answer (tool-call transcript stripped), with Markdown rendered. `verbose` shows the full transcript.
+- **Voice notes**: speak the task. It's transcribed, echoed back so you can catch a mishearing, then run.
+- **Attachments**: send photos, PDFs, anything. They're saved locally and their paths handed to the agent.
 - Follow-up context: recent turns are replayed so "summarize that" works (client-side, budget-bounded). `/new` resets.
 - Access control by chat id so only you can drive your browser.
 
@@ -71,6 +73,90 @@ open my Gmail and tell me the latest unread subject
 
 The agent does it and replies. Send `/help` in the chat for in-band commands.
 
+## Voice notes and attachments
+
+Hold the mic button and talk, or attach a file. Both work anywhere a typed
+message does — including as a follow-up ("what's on line 12 of that?").
+
+**Voice** is transcribed before the task runs, so it needs a speech-to-text
+endpoint. Any OpenAI-compatible `/audio/transcriptions` API works. The simplest
+setup is an env var:
+
+```bash
+export OPENAI_API_KEY=sk-...
+aside-remote start
+```
+
+The bot echoes what it heard (`🎙️ open my email`) before acting, so a
+mistranscription is visible rather than silently obeyed. Either way the recording
+is **deleted from disk as soon as it's transcribed**. Without an endpoint, voice
+notes reply with a setup hint and everything else keeps working.
+
+### Fully local voice (no API key, no audio leaves the machine)
+
+Run any OpenAI-compatible whisper server on loopback and point `baseUrl` at it:
+
+```json
+{ "voice": { "baseUrl": "http://127.0.0.1:8000/v1", "model": "small.en" } }
+```
+
+**A loopback `baseUrl` needs no API key** — `apiKey` may stay `null`. Plain
+`http://` is accepted for loopback only; the bridge refuses to POST an
+`Authorization` header over cleartext to any other host.
+
+Servers that speak this API today: [`speaches`](https://github.com/speaches-ai/speaches)
+(formerly `faster-whisper-server`), or `whisper-server` from
+[whisper.cpp](https://github.com/ggerganov/whisper.cpp). Both expose
+`POST /v1/audio/transcriptions`.
+
+Speed, measured on an M-series Mac with `faster-whisper` `tiny.en` on CPU: a
+3-second voice note transcribed in **~2 s**. `tiny.en` is the least accurate
+model — step up to `small.en` or `medium.en` if it fumbles accents or noise.
+
+> [!IMPORTANT]
+> ⚠️ **The agent must be allowed to read wherever attachments land**, or every
+> file task hangs.
+>
+> Aside gates reads outside its permitted folders behind a desktop approval that
+> the bridge can't answer, so the agent goes silent and the task dies on the
+> stall timeout. Either grant read access to `~/.aside-remote/attachments` in
+> Aside → **Settings → Permissions → Can read**, or point downloads somewhere
+> Aside already trusts:
+>
+> ```json
+> { "attachments": { "dir": "~/.aside/u/0/agents/main/inbox" } }
+> ```
+>
+> Voice notes are unaffected — the bridge reads the audio itself.
+
+**Attachments** (photos, documents, video) are downloaded to
+`~/.aside-remote/attachments/<channel>/<chat>/` and their paths are appended to
+the prompt, so the agent opens them with its own file tools:
+
+```
+what's the total on this?          ← your caption
+[receipt.pdf]                      ← your file
+```
+
+becomes
+
+```
+what's the total on this?
+
+Attached files, saved on this machine — open them with your file tools:
+- /Users/you/.aside-remote/attachments/telegram-mybot/12345/98-0-receipt.pdf (application/pdf, 84 KB)
+```
+
+Notes:
+
+- Sending several photos at once (an album) is **one** task, not one per photo.
+- Telegram's Bot API refuses to serve downloads over 20 MB — that's the ceiling
+  regardless of `attachments.maxBytes`.
+- Voice notes, round video notes, and audio files are transcribed. Photos,
+  documents, and video are passed through as files.
+- A caption on a file is never read as a command: a photo captioned `/new` is a
+  task about the photo.
+
 ## CLI commands
 
 | Command | What it does |
@@ -90,14 +176,18 @@ The agent does it and replies. Send `/help` in the chat for in-band commands.
 | `/new` | Start a fresh agent session (drop context) |
 | `/status` | Show the current session id |
 | `/whoami` | Show your chat id (handy when authorizing) |
+| a voice note | Transcribed, then run as a task |
+| a file or photo | Downloaded, then handed to the agent as a task |
 | anything else | Run as a task in the browser |
 
 ## Configuration
 
 State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
 
-- `config.json` — channels (incl. bot tokens) and agent settings
+- `config.json` — channels (incl. bot tokens), agent, voice, and attachment settings
 - `sessions.json` — per-chat → Aside session id map
+- `history.json` — per-chat recent turns, for follow-up context
+- `attachments/` — files received from chats (audio is deleted after transcription)
 
 `config.json` agent block (defaults shown):
 
@@ -152,8 +242,67 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   than a turn count. `/new` clears it; `context: false` makes each message
   independent.
 
+`config.json` voice + attachments blocks (defaults shown):
+
+```json
+{
+  "voice": {
+    "enabled": true,
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "whisper-1",
+    "apiKey": null,
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "language": null,
+    "timeoutMs": 120000,
+    "echoTranscript": true
+  },
+  "attachments": {
+    "enabled": true,
+    "maxBytes": 20971520,
+    "dir": null
+  }
+}
+```
+
+- `baseUrl`: any OpenAI-compatible `/audio/transcriptions` endpoint. Use
+  `https://api.groq.com/openai/v1` for Groq, or `http://localhost:8000/v1` for a
+  self-hosted whisper server if you'd rather no audio left the machine.
+- `apiKey` / `apiKeyEnv`: `apiKey` wins if set; otherwise the named environment
+  variable is read. Prefer the env var — it never touches disk.
+- `language`: an ISO-639-1 hint like `"en"`. `null` auto-detects.
+- `echoTranscript`: post `🎙️ <what I heard>` before running the task. Leave this
+  on: it's the only way to notice a mistranscription before the agent acts on it.
+- `enabled`: two independent killswitches. `attachments.enabled: false` refuses
+  files; `voice.enabled: false` refuses voice notes. Either refusal happens
+  **before the first byte is downloaded**.
+- `attachments.dir`: where downloads land. `null` means
+  `<ASIDE_REMOTE_HOME>/attachments`. A leading `~` is expanded. Set this to a
+  folder Aside can already read (see the callout above) to avoid the permission
+  grant — the agent has to open these files, and a read it isn't allowed to make
+  hangs the task until the stall timeout fires.
+
 > Tip: tokens live in `config.json`. Keep `~/.aside-remote/` private (the CLI
 > creates it `0700`/`0600`). The repo `.gitignore` already excludes config.
+> Prefer `OPENAI_API_KEY` in the environment over `voice.apiKey` on disk.
+
+## Troubleshooting
+
+**The bot ignores everything I send.** Telegram hands each update to exactly one
+`getUpdates` caller, so a second bridge on the same token silently steals your
+messages. Only run one. The bridge now logs this:
+
+```
+[telegram-mybot] getUpdates rejected: Conflict: terminated by other getUpdates request
+[telegram-mybot] another process is polling this bot token. Stop it, or updates
+                 will go to whichever instance wins the race.
+```
+
+Restarting the bridge can briefly show that same warning — Telegram holds the
+old long-poll open for up to 30s. It clears on its own.
+
+**File tasks hang, then report a stall.** The agent can't read the attachments
+directory. See the callout in
+[Voice notes and attachments](#voice-notes-and-attachments).
 
 ## Security
 
@@ -161,6 +310,14 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   bot is **open** and anyone who finds it can control your browser.
 - The bridge only acts on messages from authorized chats; others get a polite
   "not authorized" with their chat id so you can choose to allow them.
+- Attachments are **never downloaded until the sender is authorized**, so a
+  stranger can't make the bridge pull bytes onto your disk. Files land in
+  `~/.aside-remote/attachments/` (`0700`/`0600`), namespaced per chat. They are
+  kept for the agent to re-read; delete the directory whenever you like.
+- Voice recordings are deleted immediately after transcription — only the text
+  survives, in `history.json`.
+- Sending a voice note ships that audio to whatever `voice.baseUrl` points at
+  (OpenAI by default). Point it at a local whisper server to avoid that.
 
 ## Adding a new channel (for contributors)
 
@@ -168,6 +325,11 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
    Implement `static type`, `static async setup(io)`, `start({ onMessage, signal })`,
    `sendText`, and optionally `sendTyping` / `sendImage`.
 2. Register it in `src/channels/index.js`.
+
+To support voice/files, have `start()` include an `attachments` array on each
+message (see `base.js` for the shape). Keep `download()` **lazy** — the bridge
+calls it only after authorization, which is what keeps unauthorized senders from
+writing to your disk.
 
 That's it — the CLI, config, bridge, sessions, and access control all work
 against the `Channel` interface, so no other file needs changes.
@@ -190,9 +352,11 @@ against the `Channel` interface, so no other file needs changes.
 
 **Richer input & output**
 
-- Voice notes → tasks (transcribe incoming voice messages).
-- Image input — send a photo as context for a task.
 - Image display — return screenshots and generated/referenced images inline in chat.
+- Outbound files — send the agent's generated documents back as attachments
+  (only `sendPhoto` is wired up today).
+- Local speech-to-text — spawn a `whisper.cpp` binary instead of calling an HTTP
+  endpoint, for a fully offline voice path.
 - Per-message model / speed / effort controls (`/model`, `/fast`, `/effort`) —
   Aside already exposes `--model` / `--speed` / `--effort` / `--account`.
 
