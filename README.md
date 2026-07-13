@@ -199,7 +199,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
     "continueArgs": ["--session", "{session}"],
     "sessionRegex": null,
     "timeoutMs": 1800000,
-    "idleTimeoutMs": 120000,
+    "idleTimeoutMs": 420000,
     "stream": true,
     "streamThrottleMs": 1800,
     "verbose": false,
@@ -220,7 +220,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   id is ever rejected, the bridge drops it and retries as a fresh session.
 - `timeoutMs` / `idleTimeoutMs`: two independent kill switches. `timeoutMs` is
   the hard cap on total task time (30 min). `idleTimeoutMs` is a stall detector:
-  if the agent streams **nothing** for this long (2 min default; `0` disables),
+  if the agent streams **nothing** for this long (7 min default; `0` disables),
   the bridge assumes it's wedged, kills it, and replies with an explanation
   instead of hanging out the full `timeoutMs`. This is what catches the common
   case where the agent blocks on a **local approval** — see
