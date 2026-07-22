@@ -18,7 +18,7 @@ import { Bridge } from '../src/bridge.js';
 import { Channel } from '../src/channels/base.js';
 import { TelegramChannel } from '../src/channels/telegram.js';
 import { Agent } from '../src/agent.js';
-import { sessions, history, HOME } from '../src/config.js';
+import { sessions, history, HOME, loadConfig, PTY_DRIVER } from '../src/config.js';
 import { cleanTerminalOutput, chunkText, findImagePaths } from '../src/util.js';
 
 // Guard: refuse to run against a real home dir so we never clobber live state.
@@ -144,6 +144,114 @@ test('Agent.run: idle timeout does not trip a process that finishes promptly', a
   assert.ok(!res.stalled);
   assert.equal(res.error, false);
   assert.match(res.text, /hi/);
+});
+
+// =====================  Agent auto-approve  ================================
+// A fake "agent" CLI that prints an approval prompt and only finishes once it
+// receives something on stdin — exactly the shape that would otherwise hang.
+function writeFakeApprover() {
+  const p = path.join(HOME, 'fake-approver.mjs');
+  fs.writeFileSync(p, [
+    "process.stdout.write('working on it...\\n');",
+    "process.stdout.write('Approve this action? [y/N]\\n');",
+    "let got = '';",
+    "process.stdin.on('data', (d) => { got += d.toString();",
+    "  if (got.length) { process.stdout.write('APPROVED, finished\\n'); process.exit(0); } });",
+    "process.stdin.on('end', () => {});",
+    // Self-timeout so a genuinely unanswered prompt fails fast instead of hanging.
+    "setTimeout(() => { process.stdout.write('NO INPUT, gave up\\n'); process.exit(1); }, 2500);",
+  ].join('\n'));
+  return p;
+}
+
+test('autoApprove answers an interactive prompt instead of hanging to timeout', async () => {
+  const fake = writeFakeApprover();
+  const agent = new Agent({
+    command: process.execPath, newArgs: [fake], continueArgs: [fake], wrapper: [],
+    autoApprove: true, approvePromptRegex: '\\[y/n\\]|approve', approveInput: 'y\n',
+    timeoutMs: 6000,
+  });
+  const res = await agent.run({ prompt: 'do the thing' });
+  assert.ok(res.text.includes('APPROVED'), `expected approval, got: ${res.text}`);
+  assert.equal(res.code, 0);
+});
+
+test('without autoApprove the same prompt goes unanswered (stdin is closed)', async () => {
+  const fake = writeFakeApprover();
+  const agent = new Agent({
+    command: process.execPath, newArgs: [fake], continueArgs: [fake], wrapper: [],
+    autoApprove: false, timeoutMs: 6000,
+  });
+  const res = await agent.run({ prompt: 'do the thing' });
+  assert.ok(res.text.includes('NO INPUT'), `expected no-input path, got: ${res.text}`);
+});
+
+// =====================  Wrapper / error surfacing  =========================
+// A wrapper or agent that fails must never leak its stderr (or a Python
+// traceback from the pty driver) into chat — that leak was the original bug
+// ("script: tcgetattr/ioctl: Operation not supported on socket"). stderr is
+// kept on errorDetail for logging; the reply falls back to the placeholder.
+test('stderr is never surfaced as the reply (kept on errorDetail)', async () => {
+  const agent = new Agent({
+    command: process.execPath,
+    newArgs: ['-e', 'process.stderr.write("BOOM internal wrapper error"); process.exit(1)'],
+    continueArgs: [], wrapper: [], timeoutMs: 6000,
+  });
+  const res = await agent.run({ prompt: 'x' });
+  assert.equal(res.text, '(agent produced no output)');
+  assert.equal(res.error, true);
+  assert.match(res.errorDetail, /BOOM internal wrapper error/);
+});
+
+// The macOS python pty driver must exit quietly when the agent CLI can't be
+// exec'd (missing/non-executable) instead of dumping a traceback onto the pty,
+// which would be relayed to stdout and surface in chat as the "reply".
+test('python pty driver does not leak a traceback when the agent CLI is missing',
+  { skip: process.platform !== 'darwin' && 'darwin-only (needs python3 + pty)' }, async () => {
+  const agent = new Agent({
+    command: 'no-such-aside-binary-zzz', newArgs: [], continueArgs: [],
+    wrapper: ['python3', '-c', PTY_DRIVER], timeoutMs: 6000,
+  });
+  const res = await agent.run({ prompt: 'x' });
+  assert.doesNotMatch(res.raw || '', /Traceback/);
+  assert.equal(res.text, '(agent produced no output)');
+  assert.equal(res.code, 127);
+});
+
+// Existing installs persisted the broken `script -q /dev/null` wrapper; loading
+// must self-heal it (and bump the stored version) without re-running setup.
+test('loadConfig migrates a stale `script` wrapper off the broken default', () => {
+  const cfgFile = path.join(HOME, 'config.json');
+  const saved = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile) : null;
+  try {
+    fs.writeFileSync(cfgFile, JSON.stringify({
+      version: 1,
+      agent: { command: 'aside', wrapper: ['script', '-q', '/dev/null'] },
+      channels: [],
+    }));
+    const cfg = loadConfig();
+    assert.notEqual(cfg.agent.wrapper[0], 'script'); // healed to the platform default
+    assert.equal(cfg.version, 2);
+  } finally {
+    if (saved) fs.writeFileSync(cfgFile, saved); else fs.rmSync(cfgFile, { force: true });
+  }
+});
+
+// A genuinely custom wrapper must be preserved across the migration.
+test('loadConfig preserves a custom (non-shipped) wrapper', () => {
+  const cfgFile = path.join(HOME, 'config.json');
+  const saved = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile) : null;
+  try {
+    fs.writeFileSync(cfgFile, JSON.stringify({
+      version: 1,
+      agent: { command: 'aside', wrapper: ['unbuffer', '-p'] },
+      channels: [],
+    }));
+    const cfg = loadConfig();
+    assert.deepEqual(cfg.agent.wrapper, ['unbuffer', '-p']);
+  } finally {
+    if (saved) fs.writeFileSync(cfgFile, saved); else fs.rmSync(cfgFile, { force: true });
+  }
 });
 
 // =====================  Bridge in-chat commands  ============================

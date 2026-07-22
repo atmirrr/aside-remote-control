@@ -1,13 +1,46 @@
 // Wraps the Aside browser agent CLI. Each incoming chat message becomes a task.
 // Per-chat continuity is achieved by recovering a session id from CLI output
 // and passing it back on the next message.
-import { spawn } from 'node:child_process';
-import { cleanTerminalOutput } from './util.js';
+import { spawn, spawnSync } from 'node:child_process';
+import { cleanTerminalOutput, log } from './util.js';
+
+// macOS ships `python3` as a Command Line Tools stub that, until the tools are
+// installed, exits without ever starting an interpreter. Probe the configured
+// python wrapper once: if it can't import the modules the pty driver needs, drop
+// it and launch the agent directly (with a one-time warning) instead of silently
+// never running it. Non-python or empty wrappers are returned unchanged.
+let pyWrapperUsable = null;
+let warnedNoPy = false;
+function usableWrapper(wrapper) {
+  if (!wrapper.length || wrapper[0] !== 'python3') return wrapper;
+  if (pyWrapperUsable === null) {
+    try {
+      const r = spawnSync(wrapper[0], ['-c', 'import pty, select, fcntl, termios, struct'], { stdio: 'ignore' });
+      pyWrapperUsable = !r.error && r.status === 0;
+    } catch { pyWrapperUsable = false; }
+  }
+  if (pyWrapperUsable) return wrapper;
+  if (!warnedNoPy) {
+    warnedNoPy = true;
+    log.warn(`python3 pseudo-TTY wrapper unavailable (on macOS run 'xcode-select --install'); launching the agent directly — output may be limited.`);
+  }
+  return [];
+}
 
 export class Agent {
   constructor(agentCfg) {
     this.cfg = agentCfg;
     this.sessionRe = agentCfg.sessionRegex ? new RegExp(agentCfg.sessionRegex, 'i') : null;
+    // Auto-approve: when the agent suspends a task on an interactive approval
+    // prompt, the bridge writes `approveInput` to its stdin to accept and keep
+    // going — otherwise the process just blocks until the hard timeout (stdin is
+    // unattended on the chat side). Only armed when autoApprove is on *and* a
+    // prompt pattern is configured; otherwise this stays null and stdin is closed
+    // immediately, preserving the old "never hang on generic input" behaviour.
+    this.approveRe = agentCfg.autoApprove && agentCfg.approvePromptRegex
+      ? new RegExp(agentCfg.approvePromptRegex, 'i')
+      : null;
+    this.approveInput = agentCfg.approveInput ?? '\r';
   }
 
   buildArgs(prompt, sessionId) {
@@ -31,9 +64,9 @@ export class Agent {
     // beats hanging to limitMs (the 30-min hard cap).
     const idleMs = idleTimeoutMs ?? this.cfg.idleTimeoutMs ?? 0;
     const inner = this.buildArgs(prompt, sessionId);
-    // Optional wrapper (e.g. ["script","-q","/dev/null"]) gives the agent a
-    // pseudo-TTY so it actually renders output we can capture.
-    const wrapper = Array.isArray(this.cfg.wrapper) ? this.cfg.wrapper : [];
+    // Optional wrapper (e.g. ["python3","-c",PTY_DRIVER]) gives the agent a
+    // pseudo-TTY so it actually renders output we can capture. See config.js.
+    const wrapper = usableWrapper(Array.isArray(this.cfg.wrapper) ? this.cfg.wrapper : []);
     const usePty = wrapper.length > 0;
     const command = usePty ? wrapper[0] : this.cfg.command;
     const args = usePty ? [...wrapper.slice(1), this.cfg.command, ...inner] : inner;
@@ -44,11 +77,31 @@ export class Agent {
       let settled = false;
       let child;
       try {
-        // Ignore stdin so a non-TTY agent can never hang waiting for input.
-        child = spawn(command, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+        // Pipe stdin so we can answer interactive approval prompts (see below).
+        // When auto-approve is off we close it right away, so a non-TTY agent
+        // still gets EOF and can never hang waiting for generic input.
+        child = spawn(command, args, { env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
       } catch (e) {
         return resolve({ text: `Failed to launch agent (${command}): ${e.message}`, sessionId, code: -1, error: true });
       }
+      if (!this.approveRe) { try { child.stdin?.end(); } catch {} }
+
+      // Auto-approve state. `armed` flips off after we answer a prompt and back
+      // on once the prompt clears from the output, so a TUI that repaints the
+      // same prompt many times still gets exactly one answer, and a second,
+      // later approval is still handled.
+      let armed = true;
+      const maybeApprove = () => {
+        if (!this.approveRe || settled || !child.stdin || child.stdin.destroyed) return;
+        const tail = clean(out.length > 8000 ? out.slice(-8000) : out).slice(-600);
+        const visible = this.approveRe.test(tail);
+        if (armed && visible) {
+          armed = false;
+          try { child.stdin.write(this.approveInput); } catch {}
+        } else if (!armed && !visible) {
+          armed = true; // prompt cleared — ready for the next one
+        }
+      };
 
       let idleTimer = null;
       const timer = setTimeout(() => {
@@ -78,7 +131,9 @@ export class Agent {
       };
       armIdle();
 
-      child.stdout?.on('data', (d) => { const s = d.toString(); out += s; armIdle(); onData?.(s); });
+      // Auto-approve runs on the same chunks that re-arm the idle timer: an
+      // answered prompt produces fresh output, so the stall guard stays honest.
+      child.stdout?.on('data', (d) => { const s = d.toString(); out += s; armIdle(); onData?.(s); maybeApprove(); });
       child.stderr?.on('data', (d) => { err += d.toString(); armIdle(); });
       child.on('error', (e) => {
         if (settled) return;
@@ -91,14 +146,19 @@ export class Agent {
         const cleanOut = clean(out);
         const cleanErr = clean(err);
         const newSession = this.parseSession(cleanOut) || this.parseSession(cleanErr) || sessionId;
-        const text = (cleanOut || cleanErr || '(agent produced no output)');
+        // Never surface stderr as the user-facing reply. With the pty wrapper the
+        // agent's own output is merged into stdout, so `err` only carries wrapper
+        // diagnostics (a failed launch, a stub interpreter, the old "script:
+        // tcgetattr..." abort). Leaking that into chat was the original bug; keep
+        // it on `errorDetail` for logging instead.
+        const text = (cleanOut || '(agent produced no output)');
         // The continued session id was rejected by the agent (expired/unknown).
         // Flag it so the bridge can drop it and retry as a fresh session. Note:
         // the agent reports this in its output text, not via a non-zero exit code.
         const sessionMissing = !!sessionId && /\bsession not found\b|\bno such session\b|\bunknown session\b|\binvalid session\b/i.test(`${cleanOut}\n${cleanErr}`);
         // raw keeps the ANSI-coloured stdout so the bridge can colour-filter the
         // transcript down to the final answer (see util.extractAnswer).
-        resolve({ text, raw: out, sessionId: newSession, code, error: code !== 0, sessionMissing });
+        resolve({ text, raw: out, errorDetail: cleanErr, sessionId: newSession, code, error: code !== 0, sessionMissing });
       });
     });
   }

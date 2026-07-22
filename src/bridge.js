@@ -238,6 +238,8 @@ export class Bridge {
         }
         const secs = ((Date.now() - started) / 1000).toFixed(1);
         log.info(`[${channel.id}] task finished in ${secs}s (exit=${res.code}, ${String(res.text || '').length} chars)`);
+        // Surface wrapper/agent stderr in the logs (it's kept out of the chat reply).
+        if (res.error && res.errorDetail) log.warn(`[${channel.id}] agent exited ${res.code}; stderr: ${res.errorDetail.slice(0, 500)}`);
         if (res.sessionId && res.sessionId !== sid) sessions.set(channel.id, chatId, res.sessionId);
 
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }

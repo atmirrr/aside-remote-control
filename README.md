@@ -200,11 +200,14 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
     "sessionRegex": null,
     "timeoutMs": 1800000,
     "idleTimeoutMs": 420000,
+    "autoApprove": true,
+    "approvePromptRegex": "approve|allow this|proceed\\?|continue\\?|grant|requires? (your )?(approval|permission)|\\[y/n\\]|\\(y/n\\)",
+    "approveInput": "\r",
     "stream": true,
     "streamThrottleMs": 1800,
     "verbose": false,
     "context": true,
-    "contextMaxChars": 2000
+    "contextMaxChars": 20000
   }
 }
 ```
@@ -225,6 +228,18 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   instead of hanging out the full `timeoutMs`. This is what catches the common
   case where the agent blocks on a **local approval** — see
   [Enabling remote writes](#enabling-remote-writes) above.
+- `autoApprove` / `approvePromptRegex` / `approveInput`: Aside renders approvals
+  as **interactive prompts** read from its TTY. Driven from chat there's no one to
+  answer, so the task would block until `timeoutMs`. When `autoApprove` is `true`
+  (default), the bridge watches the agent's output and, the moment it matches
+  `approvePromptRegex`, sends `approveInput` to the agent's stdin to accept and
+  continue. **This grants every approval automatically** — anyone authorized to
+  message the bot can approve anything the agent asks (see Security). Set
+  `autoApprove: false` to restore the old behaviour (the prompt goes unanswered
+  and the task hits the timeout). If your Aside build words its prompt or accept
+  key differently, tune `approvePromptRegex` (a case-insensitive regex string) and
+  `approveInput` (the keystrokes to send — e.g. `"y\n"` for a `y/N` prompt, or
+  `"\r"` to confirm a selector's default).
 - `stream` / `streamThrottleMs`: when `true` (default), the bot sends a
   placeholder and edits it in place as the agent streams output, at most once
   per `streamThrottleMs` (to respect platform edit rate limits). Set
@@ -318,6 +333,11 @@ directory. See the callout in
   survives, in `history.json`.
 - Sending a voice note ships that audio to whatever `voice.baseUrl` points at
   (OpenAI by default). Point it at a local whisper server to avoid that.
+- `autoApprove` is **on by default**, so the bridge accepts every approval Aside
+  asks for without a human in the loop. That's what keeps remote tasks from
+  hanging, but it also means an authorized chat can approve sensitive actions.
+  Set `autoApprove: false` if you'd rather a prompted task stall (until you add
+  in-chat approve/deny) than be auto-accepted.
 
 ## Adding a new channel (for contributors)
 
@@ -338,11 +358,12 @@ against the `Channel` interface, so no other file needs changes.
 
 **Reliability & control**
 
-- Approval handling — the bridge now **detects the stall** (`idleTimeoutMs`) and
-  replies with an explanation instead of hanging (see
-  [Enabling remote writes](#enabling-remote-writes)). A true in-chat
-  approve/deny isn't possible until Aside exposes a headless permission mode on
-  `aside exec` — the request currently surfaces nowhere the bridge can see it.
+- Approval handling — `autoApprove` (on by default) now answers approval
+  prompts so tasks don't hang to the timeout, and `idleTimeoutMs` catches the
+  stalls it can't answer (a local approval Aside gates to its desktop UI) with
+  an explanatory reply instead of silence — see
+  [Enabling remote writes](#enabling-remote-writes). Next step: surface the
+  prompt in chat with approve/deny buttons instead of auto-accepting.
 - `/cancel` — stop a running task without waiting for the timeout.
 - Concurrency caps (per-chat and global) on spawned agent processes.
 
