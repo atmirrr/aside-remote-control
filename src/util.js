@@ -273,6 +273,20 @@ export function extractAnswer(rawOrText) {
   return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// Split a reply into its answer body and the trailing summary the agent was
+// asked to append after a sentinel line (see agent.summary in config.js).
+// Splits on the LAST occurrence: the marker also appears in the prompt, and some
+// agents echo their instructions back, which would otherwise truncate the answer
+// at the echo. Returns summary:'' when the agent ignored the instruction, so
+// callers can fall back to the full answer.
+export function splitSummary(text, marker) {
+  const s = String(text || '');
+  if (!marker) return { body: s.trim(), summary: '' };
+  const i = s.lastIndexOf(marker);
+  if (i === -1) return { body: s.trim(), summary: '' };
+  return { body: s.slice(0, i).trim(), summary: s.slice(i + marker.length).trim() };
+}
+
 // Convert a useful subset of Markdown to Telegram-flavoured HTML
 // (parse_mode=HTML supports b,i,u,s,a,code,pre,blockquote). Everything else is
 // HTML-escaped. Pair with a plain-text fallback if Telegram rejects the markup.

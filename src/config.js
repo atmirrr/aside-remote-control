@@ -115,6 +115,22 @@ const DEFAULT_CONFIG = {
     // /new clears it. Set context:false to make every message independent.
     context: true,
     contextMaxChars: 20000,
+    // Summary mode. A long task streams a lot of intermediate text into the one
+    // chat message; with summary:true the prompt asks the agent to end its reply
+    // with `summaryMarker` on its own line followed by a short recap, and the
+    // bridge shows *that* in chat — replacing everything streamed so far — the
+    // moment the marker appears. The full answer is still what gets remembered
+    // for follow-ups. If the agent ignores the instruction (no marker in the
+    // reply), the full answer is shown as usual, so this can only ever add a
+    // step, never lose the result. Off by default: it costs an extra
+    // instruction on every prompt.
+    summary: false,
+    summaryMarker: '<<<SUMMARY>>>',
+    // Phrased as "the reply the user sees", not "summarize what you did":
+    // summarize-style prompts produce narration ("The user asked for...") and
+    // drop the actual deliverable. Telling the agent the transcript above the
+    // marker is hidden makes it carry answers/paths/links across on its own.
+    summaryPrompt: 'When the task is complete, output a line containing exactly {marker} and then the reply the user will actually see in chat — everything before the marker is hidden from them. Lead with the outcome itself: the answer, data, links, or file paths the user asked for. Add brief context about how you got there only when it helps. Match the length to the task — a short answer deserves a short reply.',
   },
   // Speech-to-text for incoming voice notes. Any OpenAI-compatible
   // /audio/transcriptions endpoint works — override baseUrl to point at Groq or

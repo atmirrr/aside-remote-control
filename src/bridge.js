@@ -8,7 +8,7 @@ import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
 import { sessions, history, attachmentsDir } from './config.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
-import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
+import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, splitSummary, formatBytes } from './util.js';
 
 // Flatten recent turns into the single prompt string the CLI accepts, so
 // follow-ups keep context. The Aside CLI has no structured messages array (the
@@ -203,16 +203,28 @@ export class Bridge {
         // Conversation continuity: prepend recent turns as context (client-side).
         const useContext = this.config.agent?.context !== false;
         const ctxMax = this.config.agent?.contextMaxChars ?? 2000;
-        const prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
+        let prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
+        // Summary mode: ask for a sentinel-delimited final reply at the end.
+        // Appended to the prompt only — never stored in history, so it isn't
+        // replayed as part of the conversation on the next turn.
+        const summaryOn = this.config.agent?.summary === true;
+        const marker = summaryOn ? (this.config.agent?.summaryMarker || '<<<SUMMARY>>>') : null;
+        if (summaryOn) {
+          const instruction = (this.config.agent?.summaryPrompt || '').replace('{marker}', marker);
+          if (instruction) prompt = `${prompt}\n\n${instruction}`;
+        }
 
         // Live-edit state: accumulate raw output, push the latest tail on a timer.
         let acc = '';
         let editCount = 0;
         // Progress view: the raw transcript tail when verbose, else the cleaned
         // answer-so-far (which stays empty while the agent is doing tool work).
+        // Once the summary marker shows up mid-stream, switch the view to the
+        // final reply alone — the in-place swap that replaces the transcript.
         const renderPartial = () => {
           const view = verbose ? cleanTerminalOutput(acc) : extractAnswer(acc);
-          return view.slice(-3500).trim();
+          const { summary } = splitSummary(view, marker);
+          return (summary || view).slice(-3500).trim();
         };
         const pushEdit = async (textToShow) => {
           if (editing) return;
@@ -264,6 +276,11 @@ export class Bridge {
           if (!answer) log.warn(`[${channel.id}] no answer extracted from ${String(res.text || '').length}-char transcript`);
           finalText = answer || '(No answer produced — the task may have stopped early or needed an approval.)';
         }
+        // Summary mode: show the recap, keep the full answer for history. No
+        // marker means the agent ignored the instruction — show the full answer.
+        const split = splitSummary(finalText, marker);
+        if (summaryOn && !split.summary) log.warn(`[${channel.id}] summary requested but the reply had no "${marker}" marker`);
+        finalText = split.summary || split.body;
         const opts = verbose ? {} : { markdown: true };
         const parts = chunkText(finalText, 3900);
         if (streaming) {
@@ -284,7 +301,9 @@ export class Bridge {
         // it's their paths — so "summarize that pdf again" still resolves.
         if (useContext) {
           history.append(channel.id, chatId, 'user', messageText, ctxMax);
-          const cleanAnswer = extractAnswer(res.raw || res.text || '');
+          // The full answer, not the recap: follow-ups ("the second one") need
+          // the detail that summary mode hides from the chat.
+          const cleanAnswer = splitSummary(extractAnswer(res.raw || res.text || ''), marker).body;
           if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
         }
         // Best-effort: attach any image artifacts the agent referenced. Several

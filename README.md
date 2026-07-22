@@ -207,7 +207,10 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
     "streamThrottleMs": 1800,
     "verbose": false,
     "context": true,
-    "contextMaxChars": 20000
+    "contextMaxChars": 20000,
+    "summary": false,
+    "summaryMarker": "<<<SUMMARY>>>",
+    "summaryPrompt": "When the task is complete, output a line containing exactly {marker} and then the reply the user will actually see in chat — everything before the marker is hidden from them. Lead with the outcome itself: the answer, data, links, or file paths the user asked for. Add brief context about how you got there only when it helps. Match the length to the task — a short answer deserves a short reply."
   }
 }
 ```
@@ -256,6 +259,18 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   **character budget** (`contextMaxChars`, oldest turns dropped first) rather
   than a turn count. `/new` clears it; `context: false` makes each message
   independent.
+- `summary` / `summaryMarker` / `summaryPrompt`: a long task streams a lot of
+  intermediate text into the one chat message. With `summary: true`, each prompt
+  asks the agent to end its reply with `summaryMarker` on its own line followed
+  by the final chat-facing reply (outcome first — the instruction tells the agent
+  everything before the marker stays hidden, so it carries answers, links, and
+  file paths across itself) — and the moment that marker appears in the stream,
+  the bridge **replaces everything streamed so far** with that reply alone. The full answer
+  is still what's remembered for follow-ups, so "what was the second one?" still
+  works. If the agent ignores the instruction (no marker in the reply), the full
+  answer is shown as usual and a warning is logged — so this can only add a step,
+  never lose the result. Off by default: it appends an instruction to every
+  prompt. `{marker}` in `summaryPrompt` is substituted with `summaryMarker`.
 
 `config.json` voice + attachments blocks (defaults shown):
 
