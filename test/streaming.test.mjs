@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { Bridge } from '../src/bridge.js';
+import { Channel } from '../src/channels/base.js';
 import { HOME } from '../src/config.js';
 import { sleep } from '../src/util.js';
 
@@ -28,6 +29,7 @@ function streamChannel() {
     async editText(_c, _mid, t) { this.edits.push(t); return true; },
     async sendTyping() { this.typings++; },
     async sendImage(_c, p) { this.images.push(p); },
+    async sendImages(c, ps, cap) { return Channel.prototype.sendImages.call(this, c, ps, cap); },
   };
 }
 
@@ -40,6 +42,7 @@ function plainChannel() {
     async sendText(_c, t) { this.sentText.push(t); }, // returns undefined (no id)
     async sendTyping() { this.typings++; },
     async sendImage() {},
+    async sendImages(c, ps, cap) { return Channel.prototype.sendImages.call(this, c, ps, cap); },
   };
 }
 

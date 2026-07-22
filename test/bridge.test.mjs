@@ -15,6 +15,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { Bridge } from '../src/bridge.js';
+import { Channel } from '../src/channels/base.js';
+import { TelegramChannel } from '../src/channels/telegram.js';
 import { Agent } from '../src/agent.js';
 import { sessions, history, HOME } from '../src/config.js';
 import { cleanTerminalOutput, chunkText, findImagePaths } from '../src/util.js';
@@ -37,10 +39,12 @@ function makeChannel(authorized = ['1']) {
     sentText: [],
     typings: 0,
     images: [],
+    albums: [],
     isAuthorized(chatId) { return authorized.includes(String(chatId)); },
     async sendText(_chatId, t) { this.sentText.push(t); },
     async sendTyping() { this.typings++; },
     async sendImage(_chatId, p) { this.images.push(p); },
+    async sendImages(chatId, ps, caption) { this.albums.push(ps); return Channel.prototype.sendImages.call(this, chatId, ps, caption); },
   };
 }
 
@@ -245,6 +249,72 @@ test('image paths in agent output are sent as images', async () => {
   const ch = makeChannel();
   await bridge.handleMessage(ch, { chatId: '1', text: 'screenshot', from: 'u' });
   assert.deepEqual(ch.images, ['/tmp/shot.png']);
+});
+
+test('several image paths are handed to the channel as one group', async () => {
+  resetSessions();
+  const bridge = makeBridge(async () => ok('shots: /tmp/a.png and /tmp/b.png and /tmp/c.png'));
+  const ch = makeChannel();
+  await bridge.handleMessage(ch, { chatId: '1', text: 'screenshot', from: 'u' });
+  assert.deepEqual(ch.albums, [['/tmp/a.png', '/tmp/b.png', '/tmp/c.png']]);
+});
+
+// =====================  Telegram albums  =====================================
+// Exercise the sendMediaGroup payload without touching the network: the HTTP
+// layer is stubbed and we assert on what would have been posted.
+function fakeTelegram(files) {
+  const dir = fs.mkdtempSync(path.join(HOME, 'imgs-'));
+  const paths = files.map((n) => {
+    const p = path.join(dir, n);
+    fs.writeFileSync(p, 'png-bytes');
+    return p;
+  });
+  const ch = new TelegramChannel({ id: 'tg', type: 'telegram', token: 'x' });
+  ch.calls = [];
+  ch.postMultipart = async (method, fields, parts) => { ch.calls.push({ method, fields, parts }); return { ok: true }; };
+  return { ch, paths };
+}
+
+test('telegram: multiple images go out as one sendMediaGroup', async () => {
+  const { ch, paths } = fakeTelegram(['a.png', 'b.png', 'c.png']);
+  await ch.sendImages('42', paths, 'three shots');
+  assert.equal(ch.calls.length, 1);
+  const [call] = ch.calls;
+  assert.equal(call.method, 'sendMediaGroup');
+  assert.equal(call.fields.chat_id, '42');
+  assert.equal(call.parts.length, 3);
+  const media = JSON.parse(call.fields.media);
+  assert.deepEqual(media.map((m) => m.media), ['attach://f0', 'attach://f1', 'attach://f2']);
+  assert.ok(media.every((m) => m.type === 'photo'));
+  // Caption rides on the first item only — that is what renders as the album caption.
+  assert.equal(media[0].caption, 'three shots');
+  assert.ok(media.slice(1).every((m) => m.caption === undefined));
+});
+
+test('telegram: a single image still uses sendPhoto (a 1-item group is invalid)', async () => {
+  const { ch, paths } = fakeTelegram(['solo.png']);
+  await ch.sendImages('42', paths, 'cap');
+  assert.deepEqual(ch.calls.map((c) => c.method), ['sendPhoto']);
+  assert.equal(ch.calls[0].fields.caption, 'cap');
+});
+
+test('telegram: more than 10 images are batched into groups of 10', async () => {
+  const { ch, paths } = fakeTelegram(Array.from({ length: 12 }, (_, i) => `s${i}.png`));
+  await ch.sendImages('42', paths);
+  assert.deepEqual(ch.calls.map((c) => c.method), ['sendMediaGroup', 'sendMediaGroup']);
+  assert.deepEqual(ch.calls.map((c) => c.parts.length), [10, 2]);
+});
+
+test('telegram: an 11th trailing image falls back to sendPhoto, not a 1-item group', async () => {
+  const { ch, paths } = fakeTelegram(Array.from({ length: 11 }, (_, i) => `s${i}.png`));
+  await ch.sendImages('42', paths);
+  assert.deepEqual(ch.calls.map((c) => c.method), ['sendMediaGroup', 'sendPhoto']);
+});
+
+test('telegram: missing files are skipped', async () => {
+  const { ch, paths } = fakeTelegram(['a.png', 'b.png']);
+  await ch.sendImages('42', [...paths, path.join(HOME, 'nope.png')]);
+  assert.equal(ch.calls[0].parts.length, 2);
 });
 
 test('a stalled task surfaces the explanatory note verbatim, not the generic fallback', async () => {

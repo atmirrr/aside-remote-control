@@ -285,9 +285,11 @@ export class Bridge {
           const cleanAnswer = extractAnswer(res.raw || res.text || '');
           if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
         }
-        // Best-effort: attach any image artifacts the agent referenced.
-        for (const img of findImagePaths(res.text)) {
-          try { await channel.sendImage(chatId, img.replace(/^~(?=\/)/, process.env.HOME || '~')); } catch {}
+        // Best-effort: attach any image artifacts the agent referenced. Several
+        // shots go out as one grouped album where the channel supports it.
+        const imgs = findImagePaths(res.text).map((p) => p.replace(/^~(?=\/)/, process.env.HOME || '~'));
+        if (imgs.length) {
+          try { await channel.sendImages(chatId, imgs); } catch {}
         }
       } catch (e) {
         const msg = `Error running task: ${e.message}`;

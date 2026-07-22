@@ -13,6 +13,7 @@ import os from 'node:os';
 import http from 'node:http';
 
 import { Bridge } from '../src/bridge.js';
+import { Channel } from '../src/channels/base.js';
 import { HOME, attachmentsDir } from '../src/config.js';
 import { TelegramChannel } from '../src/channels/telegram.js';
 import { formatBytes, sanitizeFilename, log, multipartPost } from '../src/util.js';
@@ -35,6 +36,7 @@ function makeChannel(authorized = ['1']) {
     async sendText(_chatId, t) { this.sentText.push(t); },
     async sendTyping() { this.typings++; },
     async sendImage(_chatId, p) { this.images.push(p); },
+    async sendImages(chatId, ps, caption) { return Channel.prototype.sendImages.call(this, chatId, ps, caption); },
   };
 }
 

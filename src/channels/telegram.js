@@ -277,12 +277,41 @@ export class TelegramChannel extends Channel {
     }
   }
 
+  // Single seam for multipart uploads, so tests can capture what would be
+  // posted without touching the network.
+  postMultipart(method, fields, files) {
+    return multipartPost(API(this.token, method), { fields, files });
+  }
+
   async sendImage(chatId, filePath, caption = '') {
     if (!fs.existsSync(filePath)) return false;
-    await multipartPost(API(this.token, 'sendPhoto'), {
-      fields: { chat_id: String(chatId), ...(caption ? { caption: caption.slice(0, 1000) } : {}) },
-      files: [{ field: 'photo', filename: path.basename(filePath), buffer: fs.readFileSync(filePath) }],
-    });
+    await this.postMultipart('sendPhoto',
+      { chat_id: String(chatId), ...(caption ? { caption: caption.slice(0, 1000) } : {}) },
+      [{ field: 'photo', filename: path.basename(filePath), buffer: fs.readFileSync(filePath) }]);
+    return true;
+  }
+
+  // Album: one sendMediaGroup instead of N separate photos, so the client shows
+  // a single grouped attachment. Telegram allows 2-10 items per group, so we
+  // batch in tens; a lone image falls back to sendPhoto (a 1-item group errors).
+  // The caption belongs to the first item — that renders as the album caption.
+  async sendImages(chatId, filePaths, caption = '') {
+    const files = filePaths.filter((p) => fs.existsSync(p));
+    if (files.length === 0) return false;
+    if (files.length === 1) return this.sendImage(chatId, files[0], caption);
+
+    for (let i = 0; i < files.length; i += 10) {
+      const batch = files.slice(i, i + 10);
+      // A trailing batch of exactly one can't be a group; send it on its own.
+      if (batch.length === 1) { await this.sendImage(chatId, batch[0]); continue; }
+      const parts = batch.map((p, n) => ({ field: `f${n}`, filename: path.basename(p), buffer: fs.readFileSync(p) }));
+      const media = parts.map((part, n) => ({
+        type: 'photo',
+        media: `attach://${part.field}`,
+        ...(i === 0 && n === 0 && caption ? { caption: caption.slice(0, 1000) } : {}),
+      }));
+      await this.postMultipart('sendMediaGroup', { chat_id: String(chatId), media: JSON.stringify(media) }, parts);
+    }
     return true;
   }
 }
