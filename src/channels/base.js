@@ -36,6 +36,13 @@ export class Channel {
   async sendTyping(/* chatId */) {} // optional
   async sendImage(/* chatId, filePath, caption */) {} // optional
 
+  // Send several images as one grouped attachment when the platform supports
+  // it. The default fans out to sendImage so channels only override this if
+  // they have a real album/gallery primitive.
+  async sendImages(chatId, filePaths, caption = '') {
+    for (const [i, p] of filePaths.entries()) await this.sendImage(chatId, p, i === 0 ? caption : '');
+  }
+
   // Edit a previously sent message in place. Channels that support live
   // streaming override this and return true on success; the no-op default
   // (returns false) makes the bridge fall back to a single final message.

@@ -178,38 +178,67 @@ export class TelegramChannel extends Channel {
   async sendImage(chatId, filePath, caption = '') {
     if (!fs.existsSync(filePath)) return false;
     const buf = fs.readFileSync(filePath);
-    const filename = path.basename(filePath);
-    await this.multipartPhoto(chatId, buf, filename, caption);
+    await this.multipart('sendPhoto', { chat_id: String(chatId), ...(caption ? { caption: caption.slice(0, 1000) } : {}) }, [
+      { field: 'photo', filename: path.basename(filePath), buffer: buf },
+    ]);
     return true;
   }
 
-  // Minimal multipart/form-data POST for sendPhoto (no deps).
-  multipartPhoto(chatId, buffer, filename, caption) {
+  // Album: one sendMediaGroup instead of N separate photos, so the client shows
+  // a single grouped attachment. Telegram allows 2-10 items per group, so we
+  // batch in tens; a lone image falls back to sendPhoto (a 1-item group errors).
+  // The caption belongs to the first item — that renders as the album caption.
+  async sendImages(chatId, filePaths, caption = '') {
+    const files = filePaths.filter((p) => fs.existsSync(p));
+    if (files.length === 0) return false;
+    if (files.length === 1) return this.sendImage(chatId, files[0], caption);
+
+    for (let i = 0; i < files.length; i += 10) {
+      const batch = files.slice(i, i + 10);
+      // A trailing batch of exactly one can't be a group; send it on its own.
+      if (batch.length === 1) { await this.sendImage(chatId, batch[0]); continue; }
+      const parts = batch.map((p, n) => ({ field: `f${n}`, filename: path.basename(p), buffer: fs.readFileSync(p) }));
+      const media = parts.map((part, n) => ({
+        type: 'photo',
+        media: `attach://${part.field}`,
+        ...(i === 0 && n === 0 && caption ? { caption: caption.slice(0, 1000) } : {}),
+      }));
+      await this.multipart('sendMediaGroup', { chat_id: String(chatId), media: JSON.stringify(media) }, parts);
+    }
+    return true;
+  }
+
+  // Minimal multipart/form-data POST (no deps). `fields` are plain form values;
+  // `files` are { field, filename, buffer } parts, referenced from sendMediaGroup
+  // via attach://<field>.
+  multipart(method, fields, files) {
     return new Promise((resolve, reject) => {
       const boundary = `----asideremote${Date.now().toString(16)}`;
-      const pre = [];
-      const field = (name, value) =>
-        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
-      pre.push(field('chat_id', String(chatId)));
-      if (caption) pre.push(field('caption', caption.slice(0, 1000)));
-      pre.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\n` +
-        `Content-Type: application/octet-stream\r\n\r\n`
-      );
-      const head = Buffer.from(pre.join(''), 'utf8');
-      const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
-      const body = Buffer.concat([head, buffer, tail]);
+      const chunks = [];
+      for (const [name, value] of Object.entries(fields)) {
+        chunks.push(Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
+      }
+      for (const f of files) {
+        chunks.push(Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="${f.field}"; filename="${f.filename}"\r\n` +
+          `Content-Type: application/octet-stream\r\n\r\n`, 'utf8'));
+        chunks.push(f.buffer);
+        chunks.push(Buffer.from('\r\n', 'utf8'));
+      }
+      chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+      const body = Buffer.concat(chunks);
 
-      const req = https.request(API(this.token, 'sendPhoto'), {
+      const req = https.request(API(this.token, method), {
         method: 'POST',
         headers: {
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
           'Content-Length': body.length,
         },
       }, (res) => {
-        const chunks = [];
-        res.on('data', (d) => chunks.push(d));
-        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        const out = [];
+        res.on('data', (d) => out.push(d));
+        res.on('end', () => resolve(Buffer.concat(out).toString('utf8')));
       });
       req.on('error', reject);
       req.write(body);

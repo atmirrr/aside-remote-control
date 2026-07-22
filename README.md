@@ -102,11 +102,14 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
     "continueArgs": ["--session", "{session}"],
     "sessionRegex": null,
     "timeoutMs": 1800000,
+    "autoApprove": true,
+    "approvePromptRegex": "approve|allow this|proceed\\?|continue\\?|grant|requires? (your )?(approval|permission)|\\[y/n\\]|\\(y/n\\)",
+    "approveInput": "\r",
     "stream": true,
     "streamThrottleMs": 1800,
     "verbose": false,
     "context": true,
-    "contextMaxChars": 2000
+    "contextMaxChars": 20000
   }
 }
 ```
@@ -120,6 +123,18 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   prose, storing a bogus id that gets rejected on the next message. Set it only
   if your agent CLI emits a session id in a stable, unambiguous form. If a stored
   id is ever rejected, the bridge drops it and retries as a fresh session.
+- `autoApprove` / `approvePromptRegex` / `approveInput`: Aside renders approvals
+  as **interactive prompts** read from its TTY. Driven from chat there's no one to
+  answer, so the task would block until `timeoutMs`. When `autoApprove` is `true`
+  (default), the bridge watches the agent's output and, the moment it matches
+  `approvePromptRegex`, sends `approveInput` to the agent's stdin to accept and
+  continue. **This grants every approval automatically** — anyone authorized to
+  message the bot can approve anything the agent asks (see Security). Set
+  `autoApprove: false` to restore the old behaviour (the prompt goes unanswered
+  and the task hits the timeout). If your Aside build words its prompt or accept
+  key differently, tune `approvePromptRegex` (a case-insensitive regex string) and
+  `approveInput` (the keystrokes to send — e.g. `"y\n"` for a `y/N` prompt, or
+  `"\r"` to confirm a selector's default).
 - `stream` / `streamThrottleMs`: when `true` (default), the bot sends a
   placeholder and edits it in place as the agent streams output, at most once
   per `streamThrottleMs` (to respect platform edit rate limits). Set
@@ -146,6 +161,11 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   bot is **open** and anyone who finds it can control your browser.
 - The bridge only acts on messages from authorized chats; others get a polite
   "not authorized" with their chat id so you can choose to allow them.
+- `autoApprove` is **on by default**, so the bridge accepts every approval Aside
+  asks for without a human in the loop. That's what keeps remote tasks from
+  hanging, but it also means an authorized chat can approve sensitive actions.
+  Set `autoApprove: false` if you'd rather a prompted task stall (until you add
+  in-chat approve/deny) than be auto-accepted.
 
 ## Adding a new channel (for contributors)
 
@@ -161,8 +181,9 @@ against the `Channel` interface, so no other file needs changes.
 
 **Reliability & control**
 
-- Approval handling — when Aside suspends a task waiting on an approval, surface
-  it in chat (notify, or an inline approve/deny) instead of hanging to the timeout.
+- Inline approve/deny — `autoApprove` (on by default) now auto-accepts approval
+  prompts so tasks don't hang to the timeout. Next step: optionally surface the
+  prompt in chat with approve/deny buttons instead of auto-accepting everything.
 - `/cancel` — stop a running task without waiting for the timeout.
 - Concurrency caps (per-chat and global) on spawned agent processes.
 
