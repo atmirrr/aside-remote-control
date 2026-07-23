@@ -14,6 +14,12 @@ const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
 // handing it over, so an album becomes one agent task instead of N.
 const MEDIA_GROUP_WINDOW_MS = 1500;
 
+// Render the channel-agnostic [{ text, data }] button list as one row of
+// Telegram inline keyboard buttons; taps arrive as callback_query updates.
+const inlineKeyboard = (buttons) => ({
+  inline_keyboard: [buttons.map((b) => ({ text: b.text, callback_data: b.data }))],
+});
+
 export class TelegramChannel extends Channel {
   static type = 'telegram';
   static label = 'Telegram';
@@ -103,7 +109,7 @@ export class TelegramChannel extends Channel {
   }
 
   // ---------- runtime ----------
-  async start({ onMessage, signal }) {
+  async start({ onMessage, onAction, signal }) {
     // Skip backlog: only handle messages that arrive after start.
     try {
       const drain = await this.call('getUpdates', { timeout: 0 });
@@ -137,6 +143,21 @@ export class TelegramChannel extends Channel {
         this.lastPollError = null;
         for (const u of r.result) {
           this.offset = u.update_id + 1;
+          // Inline button tap. Ack right away so the client stops the button's
+          // loading spinner, then forward to the bridge.
+          if (u.callback_query) {
+            const cb = u.callback_query;
+            this.call('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+            if (onAction && cb.message) {
+              await onAction({
+                chatId: cb.message.chat.id,
+                messageId: cb.message.message_id,
+                data: cb.data || '',
+                from: cb.from?.username || cb.from?.first_name || String(cb.from?.id || ''),
+              });
+            }
+            continue;
+          }
           const msg = u.message || u.edited_message;
           if (!msg) continue;
           // A file-bearing message carries its text in `caption`, not `text`.
@@ -250,8 +271,9 @@ export class TelegramChannel extends Channel {
 
   // One sendMessage. With { markdown: true } the text is rendered to Telegram
   // HTML; if Telegram rejects the markup it is retried as plain text.
-  async sendOne(chatId, text, { markdown } = {}) {
+  async sendOne(chatId, text, { markdown, buttons } = {}) {
     const base = { chat_id: chatId, text, disable_web_page_preview: true };
+    if (buttons?.length) base.reply_markup = inlineKeyboard(buttons);
     if (markdown) {
       const r = await this.call('sendMessage', { ...base, text: mdToTelegramHtml(text), parse_mode: 'HTML' });
       if (r?.ok) return r.result?.message_id;
@@ -263,8 +285,9 @@ export class TelegramChannel extends Channel {
   // Edit a message in place (used for streaming). Telegram rejects empty and
   // unchanged text, so the bridge only calls this with new, non-empty text.
   // { markdown: true } renders HTML with a plain-text fallback.
-  async editText(chatId, messageId, text, { markdown } = {}) {
+  async editText(chatId, messageId, text, { markdown, buttons } = {}) {
     const plain = { chat_id: chatId, message_id: messageId, text: text.slice(0, 4096), disable_web_page_preview: true };
+    if (buttons?.length) plain.reply_markup = inlineKeyboard(buttons);
     try {
       if (markdown) {
         const r = await this.call('editMessageText', { ...plain, text: mdToTelegramHtml(plain.text), parse_mode: 'HTML' });
@@ -281,6 +304,27 @@ export class TelegramChannel extends Channel {
   // posted without touching the network.
   postMultipart(method, fields, files) {
     return multipartPost(API(this.token, method), { fields, files });
+  }
+
+  // Voice note: a playable voice bubble. Telegram's sendVoice accepts OGG/Opus,
+  // MP3, or M4A; ElevenLabs returns MP3, so the buffer is sent as-is.
+  async sendVoice(chatId, buffer, caption = '') {
+    if (!buffer || buffer.length === 0) return false;
+    const res = await this.postMultipart('sendVoice', {
+      chat_id: String(chatId),
+      ...(caption ? { caption: caption.slice(0, 1000) } : {}),
+    }, [{ field: 'voice', filename: 'summary.mp3', buffer, contentType: 'audio/mpeg' }]);
+    return res?.data?.ok === true;
+  }
+
+  // Remove a sent message (voice mode deletes the streamed transcript once the
+  // voice note is out). Returns false when Telegram refuses so callers can
+  // fall back to editing the text in place.
+  async deleteMessage(chatId, messageId) {
+    try {
+      const r = await this.call('deleteMessage', { chat_id: chatId, message_id: messageId });
+      return r?.ok === true;
+    } catch { return false; }
   }
 
   async sendImage(chatId, filePath, caption = '') {

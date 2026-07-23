@@ -25,7 +25,10 @@ export class Channel {
   }
 
   // Begin receiving. Call onMessage({ chatId, text, messageId, from, attachments })
-  // per message. Must stop cleanly when signal.aborted becomes true.
+  // per message. Channels that support tappable inline buttons also call
+  // onAction({ chatId, messageId, data, from }) when one is tapped (onAction
+  // may be absent — guard before calling). Must stop cleanly when
+  // signal.aborted becomes true.
   //
   // `attachments` (optional, default []) describes any files the message carried:
   //   { kind, name, mimeType, size, durationSec, download(destDir, prefix) }
@@ -33,13 +36,15 @@ export class Channel {
   // download() must fetch the bytes and resolve with a local path. Keep it lazy:
   // the bridge only calls it once the chat has passed isAuthorized(), so an
   // unauthorized sender can never make the bridge fetch or store their files.
-  async start(/* { onMessage, signal } */) {
+  async start(/* { onMessage, onAction, signal } */) {
     throw new Error('start() not implemented');
   }
 
   // Send a message. Should return the platform message id of the sent message
   // (used by streaming to edit it in place); may return undefined otherwise.
-  async sendText(/* chatId, text */) { throw new Error('sendText() not implemented'); }
+  // opts.buttons: [{ text, data }] — rendered as tappable inline buttons by
+  // channels that support them (taps come back via onAction); ignored otherwise.
+  async sendText(/* chatId, text, opts */) { throw new Error('sendText() not implemented'); }
   async sendTyping(/* chatId */) {} // optional
   async sendImage(/* chatId, filePath, caption */) {} // optional
 
@@ -54,4 +59,14 @@ export class Channel {
   // streaming override this and return true on success; the no-op default
   // (returns false) makes the bridge fall back to a single final message.
   async editText(/* chatId, messageId, text */) { return false; }
+
+  // Send a short audio clip as a playable voice message. Channels that support
+  // it override this and return true on success; the default (false) makes the
+  // bridge fall back to sending the text instead.
+  async sendVoice(/* chatId, buffer, caption */) { return false; }
+
+  // Remove a previously sent message. Voice mode uses this to replace the
+  // streamed transcript with the voice note; the default (false) makes the
+  // bridge edit the message instead of deleting it.
+  async deleteMessage(/* chatId, messageId */) { return false; }
 }

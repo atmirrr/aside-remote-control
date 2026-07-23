@@ -6,8 +6,9 @@ import path from 'node:path';
 import { Agent } from './agent.js';
 import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
-import { sessions, history, attachmentsDir } from './config.js';
+import { sessions, history, attachmentsDir, saveConfig } from './config.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
+import { synthesizeVoice } from './voice.js';
 import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, splitSummary, formatBytes } from './util.js';
 
 // Flatten recent turns into the single prompt string the CLI accepts, so
@@ -57,6 +58,7 @@ const HELP = [
   '',
   'Commands:',
   '  /new      start a fresh agent session (forget context)',
+  '  /voice    toggle voice replies (spoken recaps) on/off',
   '  /status   show the current session id',
   '  /whoami   show your chat id',
   '  /help     show this help',
@@ -67,6 +69,7 @@ export class Bridge {
     this.config = config;
     this.agent = new Agent(config.agent);
     this.transcribe = transcribe; // swappable for tests
+    this.synthesize = synthesizeVoice; // ElevenLabs TTS; swapped out in tests
     this.queues = new Map(); // chatId -> Promise chain
     this.controller = new AbortController();
   }
@@ -76,6 +79,71 @@ export class Bridge {
     const next = prev.then(task, task);
     this.queues.set(chatId, next.catch(() => {}));
     return next;
+  }
+
+  // /voice command: current state plus a one-tap inline toggle. The button's
+  // label shows the switch position; tapping it fires the voice:toggle action.
+  voiceStatus() {
+    const a = this.config.agent || {};
+    const on = a.voice === true;
+    const hasKey = Boolean(a.voiceApiKey || process.env.ELEVENLABS_API_KEY);
+    let text = on
+      ? 'Voice replies are ON: task recaps arrive as spoken voice notes.'
+      : 'Voice replies are OFF: recaps are sent as text.';
+    if (on && !hasKey) {
+      text += '\n⚠️ No ElevenLabs key is set (agent.voiceApiKey or the ELEVENLABS_API_KEY env var), so replies fall back to text until one is added.';
+    }
+    return {
+      text,
+      buttons: [{ text: on ? '🔊 Voice: ON — tap to turn off' : '🔇 Voice: OFF — tap to turn on', data: 'voice:toggle' }],
+    };
+  }
+
+  // Button taps forwarded by channels that support inline actions. Same
+  // authorization gate as messages: buttons only render in chats the bot posted
+  // to, but the update's chat id is still checked before acting on it.
+  async handleAction(channel, { chatId, messageId, data, from }) {
+    if (!channel.isAuthorized(chatId)) {
+      log.warn(`[${channel.id}] blocked action "${data}" from unauthorized chat ${chatId} (${from})`);
+      return;
+    }
+    if (data === 'voice:toggle') {
+      this.config.agent.voice = this.config.agent.voice !== true;
+      saveConfig(this.config); // survives a bridge restart
+      log.info(`[${channel.id}] (${from}) voice replies ${this.config.agent.voice ? 'enabled' : 'disabled'}`);
+      const status = this.voiceStatus();
+      // Flip the button in place; fall back to a fresh message if the edit fails.
+      const edited = messageId != null && await channel.editText(chatId, messageId, status.text, { buttons: status.buttons });
+      if (!edited) await channel.sendText(chatId, status.text, { buttons: status.buttons });
+    }
+  }
+
+  // Voice mode: synthesize the recap with ElevenLabs and send it as a voice
+  // note. voice:true implies summary mode (handleMessage requests the recap
+  // whenever either is on). Returns true only once the voice message is
+  // actually in the chat; every other path returns false so the caller falls
+  // back to the text reply — voice can upgrade a reply, never lose one.
+  async speakSummary(channel, chatId, summary) {
+    const a = this.config.agent || {};
+    if (a.voice !== true || !summary) return false;
+    if (typeof channel.sendVoice !== 'function') return false;
+    const apiKey = a.voiceApiKey || process.env.ELEVENLABS_API_KEY;
+    if (!apiKey) {
+      log.warn(`[${channel.id}] voice mode is on but no ElevenLabs key is set (agent.voiceApiKey or ELEVENLABS_API_KEY)`);
+      return false;
+    }
+    // A recap this long isn't a voice note (and would burn TTS credits).
+    if (summary.length > 4000) {
+      log.warn(`[${channel.id}] recap too long to speak (${summary.length} chars); sending text instead`);
+      return false;
+    }
+    try {
+      const audio = await this.synthesize({ apiKey, voiceId: a.voiceId, modelId: a.voiceModelId, text: summary });
+      return (await channel.sendVoice(chatId, audio)) === true;
+    } catch (e) {
+      log.warn(`[${channel.id}] voice synthesis/send failed: ${e.message}; sending text instead`);
+      return false;
+    }
   }
 
   // Fetch a message's files and turn any speech into text. Called only after the
@@ -150,6 +218,10 @@ export class Bridge {
       history.clear(channel.id, chatId);
       return channel.sendText(chatId, 'Started a fresh session. Send your task.');
     }
+    if (cmd === '/voice') {
+      const status = this.voiceStatus();
+      return channel.sendText(chatId, status.text, { buttons: status.buttons });
+    }
 
     // Real task -> run in order for this chat.
     return this.enqueue(chatId, async () => {
@@ -206,8 +278,10 @@ export class Bridge {
         let prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
         // Summary mode: ask for a sentinel-delimited final reply at the end.
         // Appended to the prompt only — never stored in history, so it isn't
-        // replayed as part of the conversation on the next turn.
-        const summaryOn = this.config.agent?.summary === true;
+        // replayed as part of the conversation on the next turn. voice:true
+        // implies summary mode: the voice note speaks the recap, so it has to
+        // be requested — no need to also set summary:true.
+        const summaryOn = this.config.agent?.summary === true || this.config.agent?.voice === true;
         const marker = summaryOn ? (this.config.agent?.summaryMarker || '<<<SUMMARY>>>') : null;
         if (summaryOn) {
           const instruction = (this.config.agent?.summaryPrompt || '').replace('{marker}', marker);
@@ -283,7 +357,23 @@ export class Bridge {
         finalText = split.summary || split.body;
         const opts = verbose ? {} : { markdown: true };
         const parts = chunkText(finalText, 3900);
-        if (streaming) {
+        // Voice mode: where summary mode would swap the transcript for the
+        // recap text, deliver the recap as a spoken voice note instead. Tried
+        // before any text lands, so a failure falls through with nothing lost.
+        if (await this.speakSummary(channel, chatId, split.summary)) {
+          if (streaming) {
+            while (editing) await sleep(20);
+            // Deleting the streamed message is the "replace": the voice note
+            // stands alone. If the channel can't delete, land the recap text
+            // there instead so it isn't left showing a stale transcript tail.
+            let deleted = false;
+            try { deleted = (await channel.deleteMessage?.(chatId, msgId)) === true; } catch {}
+            if (!deleted && parts[0] !== lastShown) {
+              try { await channel.editText(chatId, msgId, parts[0], opts); } catch {}
+            }
+          }
+          log.info(`[${channel.id}] recap delivered as a voice note`);
+        } else if (streaming) {
           // Land the final result into the streamed message; overflow as follow-ups.
           while (editing) await sleep(20);
           if (parts[0] !== lastShown) {
@@ -338,6 +428,7 @@ export class Bridge {
       return channel.start({
         signal,
         onMessage: (msg) => this.handleMessage(channel, msg),
+        onAction: (act) => this.handleAction(channel, act),
       });
     });
 

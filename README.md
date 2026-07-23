@@ -9,6 +9,7 @@ Remote-control your [Aside](https://aside.com) browser agent from chat apps. Sen
 - **Voice notes**: speak the task. It's transcribed, echoed back so you can catch a mishearing, then run.
 - **Attachments**: send photos, PDFs, anything. They're saved locally and their paths handed to the agent.
 - Follow-up context: recent turns are replayed so "summarize that" works (client-side, budget-bounded). `/new` resets.
+- Voice replies (optional): set `voice: true` plus an ElevenLabs key and the reply arrives as a spoken voice note (summary mode is implied automatically).
 - Access control by chat id so only you can drive your browser.
 
 > The bridge runs on your machine and drives **your** local Aside agent. Anyone you authorize can make that agent do anything you can. Treat the bot token and your config like credentials.
@@ -174,6 +175,7 @@ Notes:
 | --- | --- |
 | `/help` | Show help |
 | `/new` | Start a fresh agent session (drop context) |
+| `/voice` | Toggle voice replies on/off (replies with an inline toggle button) |
 | `/status` | Show the current session id |
 | `/whoami` | Show your chat id (handy when authorizing) |
 | a voice note | Transcribed, then run as a task |
@@ -210,7 +212,11 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
     "contextMaxChars": 20000,
     "summary": false,
     "summaryMarker": "<<<SUMMARY>>>",
-    "summaryPrompt": "When the task is complete, output a line containing exactly {marker} and then the reply the user will actually see in chat — everything before the marker is hidden from them. Lead with the outcome itself: the answer, data, links, or file paths the user asked for. Add brief context about how you got there only when it helps. Match the length to the task — a short answer deserves a short reply."
+    "summaryPrompt": "When the task is complete, output a line containing exactly {marker} and then the reply the user will actually see in chat — everything before the marker is hidden from them. Lead with the outcome itself: the answer, data, links, or file paths the user asked for. Add brief context about how you got there only when it helps. Match the length to the task — a short answer deserves a short reply.",
+    "voice": false,
+    "voiceApiKey": null,
+    "voiceId": "1t1EeRixsJrKbiF1zwM6",
+    "voiceModelId": "eleven_multilingual_v2"
   }
 }
 ```
@@ -271,6 +277,23 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   answer is shown as usual and a warning is logged — so this can only add a step,
   never lose the result. Off by default: it appends an instruction to every
   prompt. `{marker}` in `summaryPrompt` is substituted with `summaryMarker`.
+- `voice` / `voiceApiKey` / `voiceId` / `voiceModelId`: **voice mode**. With
+  `voice: true` and an [ElevenLabs](https://elevenlabs.io) API key available,
+  the recap is synthesized with ElevenLabs and delivered as a **voice note**
+  instead of text — the streamed transcript message is deleted once the voice
+  is sent, so the spoken recap is the reply. Voice mode **implies summary
+  mode** (the voice note speaks the recap, so one is always requested); there
+  is no need to also set `summary: true`. Put the key in the
+  `ELEVENLABS_API_KEY` environment variable (preferred — keeps it out of the
+  config file) or in `voiceApiKey`. `voiceId` picks the voice — set it to any
+  voice id from your ElevenLabs account (My Voices or the Voice Library; the id
+  is on each voice's card) — and `voiceModelId` picks the model. If the key is
+  missing or synthesis fails, the
+  recap is shown as text as usual — voice can only upgrade the reply, never
+  lose it. Follow-up context is unaffected: the full answer is still what's
+  remembered. Toggle it from chat by sending `/voice` — the bot replies with
+  the current state and an inline on/off button, and the change is saved to
+  the config so it survives restarts.
 
 `config.json` voice + attachments blocks (defaults shown):
 

@@ -131,6 +131,21 @@ const DEFAULT_CONFIG = {
     // drop the actual deliverable. Telling the agent the transcript above the
     // marker is hidden makes it carry answers/paths/links across on its own.
     summaryPrompt: 'When the task is complete, output a line containing exactly {marker} and then the reply the user will actually see in chat — everything before the marker is hidden from them. Lead with the outcome itself: the answer, data, links, or file paths the user asked for. Add brief context about how you got there only when it helps. Match the length to the task — a short answer deserves a short reply.',
+    // Voice mode. Implies summary mode — the voice note speaks the summary
+    // recap, so voice:true activates the recap machinery on its own; no need
+    // to also set summary:true. With an ElevenLabs API key available
+    // (voiceApiKey here, or the ELEVENLABS_API_KEY env var), the recap that
+    // summary mode would show as text is synthesized and delivered as a voice
+    // note instead — the streamed transcript message is deleted once the voice
+    // is sent, so the spoken recap IS the reply. If the key is missing,
+    // synthesis fails, or the channel can't send/delete, the text recap is
+    // shown as usual: voice can only upgrade the reply, never lose it.
+    // Follow-up context is unaffected.
+    voice: false,
+    voiceApiKey: null,                       // prefer the env var; this file is plaintext
+    // Any voice id from your ElevenLabs account (My Voices / Voice Library).
+    voiceId: '1t1EeRixsJrKbiF1zwM6',
+    voiceModelId: 'eleven_multilingual_v2',
   },
   // Speech-to-text for incoming voice notes. Any OpenAI-compatible
   // /audio/transcriptions endpoint works — override baseUrl to point at Groq or
