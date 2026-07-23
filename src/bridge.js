@@ -118,27 +118,25 @@ export class Bridge {
     }
   }
 
-  // Voice mode: synthesize the recap with ElevenLabs and send it as a voice
-  // note. voice:true implies summary mode (handleMessage requests the recap
+  // Voice mode: synthesize the reply with ElevenLabs and send it as a voice
+  // note — the recap when summary mode produced one, else the full answer (a
+  // reply without the marker is often short enough to be its own recap; no
+  // client-side length cap, the ElevenLabs API limit is the natural bound).
+  // voice:true implies summary mode (handleMessage requests the recap
   // whenever either is on). Returns true only once the voice message is
   // actually in the chat; every other path returns false so the caller falls
   // back to the text reply — voice can upgrade a reply, never lose one.
-  async speakSummary(channel, chatId, summary) {
+  async speakReply(channel, chatId, text) {
     const a = this.config.agent || {};
-    if (a.voice !== true || !summary) return false;
+    if (a.voice !== true || !text) return false;
     if (typeof channel.sendVoice !== 'function') return false;
     const apiKey = a.voiceApiKey || process.env.ELEVENLABS_API_KEY;
     if (!apiKey) {
       log.warn(`[${channel.id}] voice mode is on but no ElevenLabs key is set (agent.voiceApiKey or ELEVENLABS_API_KEY)`);
       return false;
     }
-    // A recap this long isn't a voice note (and would burn TTS credits).
-    if (summary.length > 4000) {
-      log.warn(`[${channel.id}] recap too long to speak (${summary.length} chars); sending text instead`);
-      return false;
-    }
     try {
-      const audio = await this.synthesize({ apiKey, voiceId: a.voiceId, modelId: a.voiceModelId, text: summary });
+      const audio = await this.synthesize({ apiKey, voiceId: a.voiceId, modelId: a.voiceModelId, text });
       return (await channel.sendVoice(chatId, audio)) === true;
     } catch (e) {
       log.warn(`[${channel.id}] voice synthesis/send failed: ${e.message}; sending text instead`);
@@ -357,10 +355,10 @@ export class Bridge {
         finalText = split.summary || split.body;
         const opts = verbose ? {} : { markdown: true };
         const parts = chunkText(finalText, 3900);
-        // Voice mode: where summary mode would swap the transcript for the
-        // recap text, deliver the recap as a spoken voice note instead. Tried
-        // before any text lands, so a failure falls through with nothing lost.
-        if (await this.speakSummary(channel, chatId, split.summary)) {
+        // Voice mode: deliver the reply as a spoken voice note — the recap
+        // when there is one, else the whole answer. Tried before any text
+        // lands, so a failure falls through with nothing lost.
+        if (await this.speakReply(channel, chatId, finalText)) {
           if (streaming) {
             while (editing) await sleep(20);
             // Deleting the streamed message is the "replace": the voice note
@@ -372,7 +370,7 @@ export class Bridge {
               try { await channel.editText(chatId, msgId, parts[0], opts); } catch {}
             }
           }
-          log.info(`[${channel.id}] recap delivered as a voice note`);
+          log.info(`[${channel.id}] reply delivered as a voice note`);
         } else if (streaming) {
           // Land the final result into the streamed message; overflow as follow-ups.
           while (editing) await sleep(20);

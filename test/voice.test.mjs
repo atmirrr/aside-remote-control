@@ -116,13 +116,16 @@ test('voice: true implies summary mode even when summary is explicitly false', a
   assert.deepEqual(ch.deleted, [1001]);
 });
 
-test('no recap in the reply -> no voice, full answer as text', async () => {
+test('no recap in the reply -> the full answer is spoken instead', async () => {
   resetState();
   const ch = voiceChannel();
-  const bridge = makeBridge(async () => ok('plain answer, no marker'));
+  const spoken = [];
+  const bridge = makeBridge(async () => ok('plain answer, no marker'), {},
+    async ({ text }) => { spoken.push(text); return Buffer.from('x'); });
   await bridge.handleMessage(ch, { chatId: '1', text: 'go', from: 'u' });
-  assert.equal(ch.voices.length, 0);
-  assert.equal(ch.edits.at(-1), 'plain answer, no marker');
+  assert.deepEqual(spoken, ['plain answer, no marker']);
+  assert.equal(ch.voices.length, 1);
+  assert.deepEqual(ch.deleted, [1001], 'the streamed message is still replaced');
 });
 
 test('synthesis failure falls back to the text recap', async () => {

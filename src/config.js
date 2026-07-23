@@ -137,10 +137,10 @@ const DEFAULT_CONFIG = {
     // (voiceApiKey here, or the ELEVENLABS_API_KEY env var), the recap that
     // summary mode would show as text is synthesized and delivered as a voice
     // note instead — the streamed transcript message is deleted once the voice
-    // is sent, so the spoken recap IS the reply. If the key is missing,
-    // synthesis fails, or the channel can't send/delete, the text recap is
-    // shown as usual: voice can only upgrade the reply, never lose it.
-    // Follow-up context is unaffected.
+    // is sent, so the spoken recap IS the reply. A reply without the marker is
+    // spoken in full instead. If the key is missing, synthesis fails, or the
+    // channel can't send/delete, the text reply is shown as usual: voice can
+    // only upgrade the reply, never lose it. Follow-up context is unaffected.
     voice: false,
     voiceApiKey: null,                       // prefer the env var; this file is plaintext
     // Any voice id from your ElevenLabs account (My Voices / Voice Library).

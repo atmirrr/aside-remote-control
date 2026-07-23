@@ -287,10 +287,11 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   `ELEVENLABS_API_KEY` environment variable (preferred — keeps it out of the
   config file) or in `voiceApiKey`. `voiceId` picks the voice — set it to any
   voice id from your ElevenLabs account (My Voices or the Voice Library; the id
-  is on each voice's card) — and `voiceModelId` picks the model. If the key is
-  missing or synthesis fails, the
-  recap is shown as text as usual — voice can only upgrade the reply, never
-  lose it. Follow-up context is unaffected: the full answer is still what's
+  is on each voice's card) — and `voiceModelId` picks the model. If the agent
+  skips the summary marker, the full answer is spoken instead. If the key is
+  missing or synthesis fails, the reply is shown as text as usual — voice can
+  only upgrade the reply, never lose it. Follow-up context is unaffected: the
+  full answer is still what's
   remembered. Toggle it from chat by sending `/voice` — the bot replies with
   the current state and an inline on/off button, and the change is saved to
   the config so it survives restarts.
