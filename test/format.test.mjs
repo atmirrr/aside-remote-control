@@ -7,7 +7,7 @@ import path from 'node:path';
 
 import { Bridge } from '../src/bridge.js';
 import { HOME } from '../src/config.js';
-import { extractAnswer, mdToTelegramHtml } from '../src/util.js';
+import { extractAnswer, mdToTelegramHtml, stripCitations } from '../src/util.js';
 import { TelegramChannel } from '../src/channels/telegram.js';
 
 if (!process.env.ASIDE_REMOTE_HOME) throw new Error('Set ASIDE_REMOTE_HOME to a temp dir.');
@@ -142,4 +142,40 @@ test('extractAnswer strips the CLI update banner', () => {
 });
 test('extractAnswer keeps an answer that merely mentions availability', () => {
   assert.equal(extractAnswer('The room is available tomorrow.'), 'The room is available tomorrow.');
+});
+
+// Citation markup: the agent cites sources with <citation refs="…">claim</citation>
+// (plus one nested <quote> per source). Telegram has no footnote affordance, so
+// before this the tags were HTML-escaped and shown to the user as literal text.
+test('stripCitations unwraps a citation, keeping the claim', () => {
+  assert.equal(stripCitations('It is <citation refs="s1#1">sunny</citation> today.'), 'It is sunny today.');
+});
+
+test('stripCitations drops nested quote excerpts but keeps the claim', () => {
+  const s = 'It is <citation refs="a#1,b#2">free<quote refs="a#1">entrada gratuita</quote><quote refs="b#2">no charge</quote></citation>.';
+  assert.equal(stripCitations(s), 'It is free.');
+});
+
+test('stripCitations removes orphaned/unclosed tags', () => {
+  assert.equal(stripCitations('Broken <citation refs="z#9">tail'), 'Broken tail');
+  assert.equal(stripCitations('Stray </quote> here'), 'Stray here');
+});
+
+test('stripCitations leaves citation-free text byte-identical', () => {
+  const s = 'Plain  text   spacing.\n\n\n\nAnd gaps.';
+  assert.equal(stripCitations(s), s);
+});
+
+test('stripCitations does not touch fenced code about citation syntax', () => {
+  const s = 'Docs:\n```\n<citation refs="s#1">x</citation>\n```\nSee <citation refs="s#1">above</citation>.';
+  assert.equal(stripCitations(s), 'Docs:\n```\n<citation refs="s#1">x</citation>\n```\nSee above.');
+});
+
+test('extractAnswer strips citation markup from the final answer', () => {
+  assert.equal(extractAnswer('Thinking: hmm\nThe gym is <citation refs="v#1">EUR 9/month</citation>.'), 'The gym is EUR 9/month.');
+});
+
+test('mdToTelegramHtml renders inside a citation instead of escaping the tag', () => {
+  assert.equal(mdToTelegramHtml('It is <citation refs="s#1">**sunny**</citation> today.'), 'It is <b>sunny</b> today.');
+  assert.equal(mdToTelegramHtml('Use <div> tags'), 'Use &lt;div&gt; tags');
 });

@@ -1,4 +1,6 @@
 // Small zero-dependency helpers: terminal IO, HTTP(S), text utilities.
+import fs from 'node:fs';
+import os from 'node:os';
 import readline from 'node:readline';
 import https from 'node:https';
 import http from 'node:http';
@@ -247,6 +249,28 @@ const TOOL_CALL = /^[\w.]+\s*\(/;                    // bash(, read_file(, repl(
 // colour filter and lands in the chat above the answer.
 const CLI_NOTICE = /^Aside CLI\b.*\bis available\b|^Run: aside --update\b/i;
 const ARIA_NODE = /^-\s+(title|heading|text|paragraph|link|button|generic|image|img|list|listitem|combobox|textbox|checkbox|radio|tab|tabpanel|menu|menuitem|menubar|dialog|alertdialog|banner|navigation|main|region|article|form|table|row|cell|columnheader|rowheader|separator|status|note|alert|figure|code|blockquote|group|toolbar|tooltip|switch|slider|progressbar|searchbox|option|complementary|contentinfo|caption|document)\b/i;
+// The agent cites sources as <citation refs="…">claim</citation>, optionally
+// wrapping one <quote refs="…">excerpt</quote> per source. Rich chat UIs render
+// those as footnote chrome; Telegram has none, so parse_mode=HTML escaping turns
+// the tags into literal text in the message. Keep the claim, drop the markup —
+// and drop the quote excerpts with it, since they are source metadata that would
+// otherwise read as duplicated prose spliced mid-sentence. Fenced code is stashed
+// first so a message *about* citation syntax survives intact.
+const HAS_CITE = /<\/?(?:citation|quote)\b/i;
+const QUOTE_BLOCK = /[ \t]*<quote\b[^>]*>[\s\S]*?<\/quote\s*>/gi;
+const QUOTE_TAG = /<\/?quote\b[^>]*>/gi;   // unclosed / orphaned
+const CITE_TAG = /<\/?citation\b[^>]*>/gi;  // unwrap: keep the inner text
+export function stripCitations(text) {
+  if (!text) return '';
+  const src = String(text);
+  if (!HAS_CITE.test(src)) return src;       // fast path: nothing to do
+  const fences = [];
+  let s = src.replace(/```[\s\S]*?```/g, (m) => '[[CF:' + (fences.push(m) - 1) + ']]');
+  s = s.replace(QUOTE_BLOCK, '').replace(QUOTE_TAG, '').replace(CITE_TAG, '');
+  s = s.replace(/[ \t]+([.,;:!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+\n/g, '\n');
+  return s.replace(/\[\[CF:(\d+)\]\]/g, (_, i) => fences[Number(i)]).replace(/\n{3,}/g, '\n\n').trim();
+}
+
 export function extractAnswer(rawOrText) {
   if (!rawOrText) return '';
   let s = String(rawOrText);
@@ -270,7 +294,64 @@ export function extractAnswer(rawOrText) {
   // Empty means the transcript had no user-facing answer (only Thinking + tool
   // calls, or a task suspended on an approval). Return '' — NOT the raw
   // transcript — so callers show a clean placeholder instead of leaking it.
-  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return stripCitations(kept.join('\n').replace(/\n{3,}/g, '\n\n').trim());
+}
+
+// The agent's last reply, read from Aside's own session store instead of the
+// terminal. Aside keeps every session as messages.jsonl, one JSON message per
+// line, under ~/.aside/u/<account>/sessions/<date>_<sessionId>/.
+// extractAnswer is a heuristic over the CLI's coloured stdout, and on long runs
+// it has come back empty even though the agent did reply (Oct 1, 2026: a
+// 14-minute voice task with a 314k-char transcript, so the speaker said "No
+// answer produced"). The store has the reply verbatim. Returns the text of the
+// newest assistant message that has text and was written at or after sinceMs,
+// or '' when there is none.
+export function readFinalReply(sessionId, sinceMs = 0, home = os.homedir()) {
+  if (!sessionId || !/^[\w-]{6,64}$/.test(String(sessionId))) return '';
+  let file = null;
+  try {
+    const base = path.join(home, '.aside', 'u');
+    for (const account of fs.readdirSync(base)) {
+      const dir = path.join(base, account, 'sessions');
+      let names;
+      try { names = fs.readdirSync(dir); } catch { continue; }
+      const hit = names.find((n) => n.endsWith(`_${sessionId}`));
+      const f = hit && path.join(dir, hit, 'messages.jsonl');
+      if (f && fs.existsSync(f)) { file = f; break; }
+    }
+  } catch { return ''; }
+  if (!file) return '';
+  let text;
+  try {
+    // Only the tail matters; a long session's file runs to megabytes.
+    const size = fs.statSync(file).size;
+    const MAX = 16 * 1024 * 1024;
+    if (size > MAX) {
+      const fd = fs.openSync(file, 'r');
+      const buf = Buffer.alloc(MAX);
+      try { fs.readSync(fd, buf, 0, MAX, size - MAX); } finally { fs.closeSync(fd); }
+      text = buf.toString('utf8');
+      text = text.slice(text.indexOf('\n') + 1); // drop the partial first line
+    } else {
+      text = fs.readFileSync(file, 'utf8');
+    }
+  } catch { return ''; }
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let m;
+    try { m = JSON.parse(line); } catch { continue; }
+    const ts = Number(m.timestamp) || 0;
+    if (sinceMs && ts && ts < sinceMs) break; // older than this run
+    if (m.role !== 'assistant') continue;
+    const parts = typeof m.content === 'string'
+      ? [m.content]
+      : (Array.isArray(m.content) ? m.content : []).filter((c) => c && c.type === 'text' && c.text).map((c) => c.text);
+    const reply = parts.join('\n').trim();
+    if (reply) return stripCitations(reply);
+  }
+  return '';
 }
 
 // Split a reply into its answer body and the trailing summary the agent was
@@ -293,6 +374,7 @@ export function splitSummary(text, marker) {
 const htmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 export function mdToTelegramHtml(text) {
   if (!text) return '';
+  text = stripCitations(text); // final gate: no raw citation markup reaches Telegram
   const blocks = [];
   // [[CB:n]] placeholder: plain ASCII, survives htmlEsc and the link/bold/italic
   // passes, and is astronomically unlikely to occur in real agent output.
