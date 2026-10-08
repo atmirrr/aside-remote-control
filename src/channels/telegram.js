@@ -13,6 +13,11 @@ const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
 // together by media_group_id. Wait this long for the rest of the group before
 // handing it over, so an album becomes one agent task instead of N.
 const MEDIA_GROUP_WINDOW_MS = 1500;
+// A forum topic is its own conversation inside one supergroup. The bridge keys
+// session, queue, history and /stop by a single opaque chat id, so a topic is
+// addressed as "<chat id>_t<topic id>": it gets its own session, and replies go
+// back into that topic instead of landing in the group's General.
+const TOPIC_SEP = '_t';
 
 // Render the channel-agnostic [{ text, data }] button list as one row of
 // Telegram inline keyboard buttons; taps arrive as callback_query updates.
@@ -33,8 +38,44 @@ export class TelegramChannel extends Channel {
   }
 
   async call(method, params = {}) {
-    const res = await httpsJson(API(this.token, method), { method: 'POST', body: params, timeoutMs: 65000 });
+    const res = await httpsJson(API(this.token, method), { method: 'POST', body: this.address(method, params), timeoutMs: 65000 });
     return res.data;
+  }
+
+  // ---------- chat addressing (groups, forum topics) ----------
+
+  // The bridge's key for the conversation a message belongs to. Only genuine
+  // topic messages get a topic suffix: a plain reply in a group also carries a
+  // message_thread_id (its reply chain's root), which must not split the chat.
+  chatKey(msg) {
+    return msg.is_topic_message && msg.message_thread_id
+      ? `${msg.chat.id}${TOPIC_SEP}${msg.message_thread_id}`
+      : msg.chat.id;
+  }
+
+  chatOf(chatId) { return String(chatId).split(TOPIC_SEP)[0]; }
+
+  // Turn a bridge chat key back into Telegram's addressing. Methods that post a
+  // new message (send*) need the topic; edits and deletes name a message id
+  // that is already unique within the chat, so they only need the chat.
+  address(method, params) {
+    const key = params?.chat_id;
+    if (key == null || !String(key).includes(TOPIC_SEP)) return params;
+    const [chat, thread] = String(key).split(TOPIC_SEP);
+    const out = { ...params, chat_id: /^-?\d+$/.test(chat) ? Number(chat) : chat };
+    if (method.startsWith('send') && thread) out.message_thread_id = Number(thread);
+    return out;
+  }
+
+  // In a group, clients address commands as "/stop@ThisBot". Strip our own name
+  // so the bridge's command matching sees "/stop". A command aimed at another
+  // bot in the same group is not ours: null means skip the message.
+  ownCommand(text) {
+    const m = /^(\/\w+)@(\w+)(?=\s|$)/.exec(text);
+    if (!m) return text;
+    const me = String(this.cfg.botUsername || '').toLowerCase();
+    if (me && m[2].toLowerCase() !== me) return null;
+    return m[1] + text.slice(m[0].length);
   }
 
   // ---------- setup wizard ----------
@@ -150,10 +191,11 @@ export class TelegramChannel extends Channel {
             this.call('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
             if (onAction && cb.message) {
               await onAction({
-                chatId: cb.message.chat.id,
+                chatId: this.chatKey(cb.message),
                 messageId: cb.message.message_id,
                 data: cb.data || '',
                 from: cb.from?.username || cb.from?.first_name || String(cb.from?.id || ''),
+                fromId: cb.from?.id,
               });
             }
             continue;
@@ -161,7 +203,8 @@ export class TelegramChannel extends Channel {
           const msg = u.message || u.edited_message;
           if (!msg) continue;
           // A file-bearing message carries its text in `caption`, not `text`.
-          const text = msg.text || msg.caption || '';
+          const text = this.ownCommand(msg.text || msg.caption || '');
+          if (text === null) continue; // a command for some other bot in the group
           const attachments = this.attachmentsOf(msg);
           if (!text && !attachments.length) continue; // stickers, joins, pins, ...
 
@@ -169,13 +212,19 @@ export class TelegramChannel extends Channel {
             this.bufferAlbum(msg, text, attachments, onMessage);
             continue;
           }
-          await onMessage({
-            chatId: msg.chat.id,
+          // Deliberately not awaited. The bridge already serializes tasks per
+          // chat, and a task can run for half an hour - blocking here would stop
+          // us reading further updates, so /stop could never be seen *while* the
+          // task it is meant to abort is still running. Same fire-and-forget
+          // shape bufferAlbum already uses.
+          Promise.resolve(onMessage({
+            chatId: this.chatKey(msg),
             text,
             attachments,
             messageId: msg.message_id,
             from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
-          });
+            fromId: msg.from?.id,
+          })).catch((e) => log.warn(`[${this.id}] message failed: ${e.message}`));
         }
       } catch (e) {
         if (signal.aborted) break;
@@ -194,9 +243,10 @@ export class TelegramChannel extends Channel {
   bufferAlbum(msg, text, attachments, onMessage) {
     const id = msg.media_group_id;
     const group = this.mediaGroups.get(id) || {
-      chatId: msg.chat.id,
+      chatId: this.chatKey(msg),
       messageId: msg.message_id,
       from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
+      fromId: msg.from?.id,
       text: '',
       attachments: [],
       timer: null,
@@ -303,7 +353,7 @@ export class TelegramChannel extends Channel {
   // Single seam for multipart uploads, so tests can capture what would be
   // posted without touching the network.
   postMultipart(method, fields, files) {
-    return multipartPost(API(this.token, method), { fields, files });
+    return multipartPost(API(this.token, method), { fields: this.address(method, fields), files });
   }
 
   // Voice note: a playable voice bubble. Telegram's sendVoice accepts OGG/Opus,

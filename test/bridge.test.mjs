@@ -121,6 +121,9 @@ test('Agent.run: idle timeout kills a silent-but-alive process and flags it stal
     newArgs: ['-e', 'process.stdout.write("working\\n"); setInterval(() => {}, 1000);'],
     idleTimeoutMs: 1000,
     timeoutMs: 20000,
+    // The default is report-only (the task keeps running and chat gets a Stop
+    // button); this test covers the opt-in kill path.
+    killOnTimeout: true,
   });
   const t0 = Date.now();
   const res = await a.run({ prompt: 'x' });
@@ -231,7 +234,7 @@ test('loadConfig migrates a stale `script` wrapper off the broken default', () =
     }));
     const cfg = loadConfig();
     assert.notEqual(cfg.agent.wrapper[0], 'script'); // healed to the platform default
-    assert.equal(cfg.version, 2);
+    assert.ok(cfg.version >= 2, `version bumped, got ${cfg.version}`);
   } finally {
     if (saved) fs.writeFileSync(cfgFile, saved); else fs.rmSync(cfgFile, { force: true });
   }
@@ -288,7 +291,7 @@ test('/status with no session tells the user to start one', async () => {
   const bridge = makeBridge(async () => ok('x'));
   const ch = makeChannel();
   await bridge.handleMessage(ch, { chatId: '1', text: '/status', from: 'u' });
-  assert.ok(ch.sentText.join('\n').toLowerCase().includes('no active session'));
+  assert.ok(ch.sentText.join('\n').toLowerCase().includes('no session yet'));
 });
 
 test('/status with an active session shows the id', async () => {

@@ -187,7 +187,8 @@ Notes:
 State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
 
 - `config.json` — channels (incl. bot tokens), agent, voice, and attachment settings
-- `sessions.json` — per-chat → Aside session id map
+- `sessions.json` — per-chat → Aside session id map. Before resuming one, the bridge checks Aside's db (`sqlite3 -readonly ~/.aside/u/*/state.db`) and unarchives the session if it is archived (`aside repl aside.sessions.unarchive(id)`), since Aside's own resume leaves it archived and hidden from chat lists
+- `origins.json` — Aside session id → channel id, for every session a channel ever started (append-only; `sessions.json` only keeps the current one per chat). Aside itself marks all of them `cli`; aside-phone reads this to show `telegram` / `voice` in its chat list
 - `history.json` — per-chat recent turns, for follow-up context
 - `attachments/` — files received from chats (audio is deleted after transcription)
 

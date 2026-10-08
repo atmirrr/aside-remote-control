@@ -17,11 +17,43 @@ export class Channel {
     this.label = cfg.label || cfg.id;
   }
 
+  // Chat channels get a "Thinking..." placeholder that is later edited into
+  // the final reply. Voice channels speak every message aloud, so a spoken
+  // placeholder is pure noise — they return false and receive only the final
+  // reply as a single sendText.
+  get wantsPlaceholder() { return true; }
+
+  // Chat channels can show a full answer and let the reader skim it, so the
+  // recap is optional there. A voice channel has no scrollback - whatever is
+  // not spoken is lost - so it always needs one, regardless of agent.summary.
+  get forcesSummary() { return false; }
+
+  // Optional per-channel replacement for agent.summaryPrompt, for when the
+  // house style genuinely differs (a speaker wants three spoken sentences,
+  // not a chat post). Use {marker} for the sentinel line.
+  get summaryPrompt() { return null; }
+
+  // The chat an allowlist entry names. A channel that addresses conversations
+  // inside one chat (Telegram forum topics) overrides this to drop the suffix.
+  chatOf(chatId) { return String(chatId); }
+
   // True if a given chat is allowed to drive the agent.
   isAuthorized(chatId) {
     const allow = this.cfg.allowedChatIds;
     if (!allow || allow.length === 0) return true; // open mode (not recommended)
-    return allow.map(String).includes(String(chatId));
+    return allow.map(String).includes(this.chatOf(chatId));
+  }
+
+  // Within an allowed chat, may this person drive the agent? Only matters for a
+  // shared chat (a group): with allowedUserIds set, everyone not listed is
+  // ignored. Unset keeps the old rule (anyone in an allowed chat). A private
+  // chat is its own single person, so it always passes.
+  isAllowedSender(chatId, fromId) {
+    const users = this.cfg.allowedUserIds;
+    if (!Array.isArray(users) || users.length === 0) return true;
+    if (fromId == null || fromId === '') return false;
+    if (String(fromId) === this.chatOf(chatId)) return true;
+    return users.map(String).includes(String(fromId));
   }
 
   // Begin receiving. Call onMessage({ chatId, text, messageId, from, attachments })

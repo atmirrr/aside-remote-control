@@ -7,6 +7,10 @@ import os from 'node:os';
 export const HOME = process.env.ASIDE_REMOTE_HOME || path.join(os.homedir(), '.aside-remote');
 const CONFIG_PATH = path.join(HOME, 'config.json');
 const SESSIONS_PATH = path.join(HOME, 'sessions.json');
+// Which channel started each agent session (session id -> channel id). Append-only: the
+// sessions map above only keeps the current session per chat, this keeps every one, so a
+// chat list elsewhere (aside-phone) can say "telegram" or "voice" instead of Aside's "cli".
+const ORIGINS_PATH = path.join(HOME, 'origins.json');
 
 // Pseudo-TTY driver. The Aside CLI only renders output to a TTY, so when its
 // stdout is a plain pipe it prints nothing. We used to wrap it in `script -q
@@ -55,8 +59,18 @@ export const PTY_DRIVER = [
   'os._exit(os.WEXITSTATUS(st) if os.WIFEXITED(st) else 128 + os.WTERMSIG(st))',
 ].join('\n');
 
+// The Aside CLI announces a fresh session on its first output line
+// ("created new session: <16-char id>") and a resumed one as "continuing
+// existing session: <id>". Ids are bare 16-character alphanumerics.
+export const SESSION_REGEX = '(?:created new|continuing existing) session: ([A-Za-z0-9]{16})';
+export const RESUME_ARGS = ['session', 'resume', '{session}'];
+// The pre-0.2 default. It never worked: `--session` is not a flag on the CLI
+// (resume is a subcommand), and it could only ever fire once sessionRegex was
+// set, which shipped as null. Recognised in loadConfig so old files self-heal.
+const LEGACY_CONTINUE_ARGS = ['--session', '{session}'];
+
 const DEFAULT_CONFIG = {
-  version: 2, // bump whenever a derived default (e.g. PTY_DRIVER) changes; triggers re-heal in loadConfig
+  version: 3, // bump whenever a derived default (e.g. PTY_DRIVER) changes; triggers re-heal in loadConfig
   // How to invoke the Aside browser agent. The bridge shells out to this.
   agent: {
     command: 'aside',        // CLI binary on PATH
@@ -66,25 +80,39 @@ const DEFAULT_CONFIG = {
     // Args used to *start* a new session. The prompt is appended as the last arg.
     newArgs: [],
     // Args used to *continue* a session. "{session}" is replaced with the id.
-    continueArgs: ['--session', '{session}'],
+    // `aside session resume <id> <prompt>` carries the full conversation on
+    // the Aside side, so follow-ups ("the second one") resolve without the
+    // bridge replaying anything.
+    continueArgs: [...RESUME_ARGS],
     // Regex (string) used to recover a session id from CLI output for continuity.
-    // Disabled by default: the current Aside CLI does not print a session id to
-    // stdout, and a prose-matching regex captures ordinary words (e.g. the text
-    // after "session ...") as a fake id, which then gets rejected on the next
-    // message ("Session not found"). Set this only if your agent CLI prints a
-    // session id in a stable, unambiguous form. The bridge self-heals if a
-    // stored id is ever rejected, but a bad regex still wastes a retry per turn.
-    sessionRegex: null,
-    timeoutMs: 1800000,      // 30 min hard cap per task
-    // Idle/stall cap: if the agent streams nothing for this many ms, assume it's
-    // wedged and kill it early with an explanatory reply, instead of hanging to
-    // timeoutMs. This is what catches the common case where the agent blocks on a
-    // local approval (writing to memory, editing a file) that Aside gates to its
-    // desktop UI — there's no prompt on stdin for the bridge to answer, so the
-    // process would otherwise sit silent for the full 30 min. 0 disables.
-    idleTimeoutMs: 420000,   // 7 min of total silence -> treat as stalled
+    // Group 1 must be the id. The default matches the CLI's own announcement
+    // line, which is stable and unambiguous. Set to null to disable continuity
+    // (every message then starts a fresh session, with client-side context
+    // replay as the only memory, see `context`). The bridge self-heals if a
+    // stored id is ever rejected ("Session not found"): it forgets the id and
+    // retries the message as a fresh session.
+    sessionRegex: SESSION_REGEX,
+    // On /stop (or the Stop button) the bridge interrupts the CLI process and
+    // also runs `aside session stop <id>` so the browser-side task is dropped
+    // rather than left running headless. false = keystroke/signal only.
+    stopSessionOnAbort: true,
+    // Both caps below are *report* thresholds, not kill switches. Crossing one
+    // posts a "taking longer than usual" notice carrying a Stop button, and the
+    // task keeps running; ending it is the reader's call. See killOnTimeout.
+    timeoutMs: 1800000,      // 30 min: how long before "this is taking a while"
+    // Idle/stall cap: the agent streaming nothing for this long usually means it
+    // blocked on a local approval (writing to memory, editing a file) that Aside
+    // gates to its desktop UI — there's no prompt on stdin for the bridge to
+    // answer. But a long quiet browser step looks exactly the same from out here,
+    // which is why this reports instead of killing. 0 disables the check.
+    idleTimeoutMs: 420000,   // 7 min of total silence -> raise the kill button
                              // (heavy pages behind logins can sit quiet a while
-                             // while genuinely working; too low kills live tasks)
+                             // while genuinely working)
+    // Restores the old behaviour: cross either cap and the agent process is
+    // SIGKILLed on the spot, with the reply explaining why. Worth turning on for
+    // an unattended bridge, where nobody is watching chat to tap the button and a
+    // wedged task would otherwise hold its chat's queue indefinitely.
+    killOnTimeout: false,
     // Auto-approve interactive prompts. Aside renders approvals as interactive
     // prompts and reads the answer from its TTY; driven from chat there is no one
     // to answer, so the task would otherwise block until `timeoutMs`. When
@@ -108,11 +136,13 @@ const DEFAULT_CONFIG = {
     // (like Aside's own chat UI). Set verbose:true to forward the full raw
     // transcript instead.
     verbose: false,
-    // Conversation continuity. The Aside CLI can't resume a session id, so we
-    // replay context client-side: recent turns are prepended to each prompt so
-    // follow-ups ("summarize that", "the second one") work. Bounded by a
-    // character budget (not a turn count) so prompts can't grow unbounded.
-    // /new clears it. Set context:false to make every message independent.
+    // Fallback continuity. Real continuity is the resumed Aside session (see
+    // continueArgs); this client-side replay only kicks in when a message has
+    // to start a *fresh* session — the first one, after /new, or after a
+    // stored id was rejected — so a lost session still carries its recent
+    // turns. Recent turns are recorded per chat and prepended to that first
+    // prompt, bounded by a character budget (not a turn count). /new clears
+    // it. Set context:false to never replay anything.
     context: true,
     contextMaxChars: 20000,
     // Summary mode. A long task streams a lot of intermediate text into the one
@@ -221,8 +251,21 @@ export function loadConfig() {
   // wrapper from the current platform default; genuine customizations are kept.
   const w = merged.agent.wrapper;
   const shipped = Array.isArray(w) && (w.length === 0 || w[0] === 'script' || w[0] === 'python3');
-  if ((cfg.version || 1) < DEFAULT_CONFIG.version && shipped) {
+  const stale = (cfg.version || 1) < DEFAULT_CONFIG.version;
+  if (stale && shipped) {
     merged.agent.wrapper = structuredClone(DEFAULT_CONFIG.agent.wrapper);
+  }
+  // Session continuity (version 3). Files written before it carry the broken
+  // `--session` args and a null regex, i.e. continuity switched off. Move a
+  // shipped (non-custom) pair onto the working defaults; a user who set their
+  // own continueArgs or regex keeps them.
+  const a = merged.agent;
+  const legacyArgs = Array.isArray(a.continueArgs)
+    && a.continueArgs.length === LEGACY_CONTINUE_ARGS.length
+    && a.continueArgs.every((x, i) => x === LEGACY_CONTINUE_ARGS[i]);
+  if (legacyArgs) a.continueArgs = [...RESUME_ARGS];
+  if (stale && (a.sessionRegex == null || a.sessionRegex === '') && (legacyArgs || !cfg.agent || !('continueArgs' in cfg.agent))) {
+    a.sessionRegex = SESSION_REGEX;
   }
   merged.version = DEFAULT_CONFIG.version;
   return merged;
@@ -259,12 +302,24 @@ function saveSessions(map) {
   writeJson(SESSIONS_PATH, map);
 }
 const key = (channelId, chatId) => `${channelId}:${chatId}`;
+function recordOrigin(channelId, sessionId) {
+  if (!sessionId) return;
+  const m = readJson(ORIGINS_PATH, {});
+  if (m[sessionId] === channelId) return;
+  m[sessionId] = channelId;
+  saveOrigins(m);
+}
+function saveOrigins(map) {
+  try { writeJson(ORIGINS_PATH, map); } catch {}
+}
 
 export const sessions = {
+  origin: recordOrigin,
   get(channelId, chatId) {
     return loadSessions()[key(channelId, chatId)] || null;
   },
   set(channelId, chatId, sessionId) {
+    recordOrigin(channelId, sessionId);
     const m = loadSessions();
     m[key(channelId, chatId)] = sessionId;
     saveSessions(m);
