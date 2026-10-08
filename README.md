@@ -253,6 +253,13 @@ Roles and permission gating:
 }
 ```
 
+- Per-channel group policy lives on the channel entry itself
+  (`channels[].groups`): `mode: "mention"` restricts acting in groups to
+  addressed commands, `@bot` mentions, and replies to the bot; `requireUserAllowlist`
+  + `allowedUserIds` gate senders even in allowed groups. Group members share
+  one context. See [docs/group-mode.md](docs/group-mode.md) (incl. BotFather
+  `/setprivacy`).
+
 - `roles.admins`: user ids allowed to run admin commands (like `/permission`).
   Empty means every authorized sender is admin — the v0.1.0 behaviour.
 - `permissions.allowChatOverride` (default `false`): set `true` to let admins

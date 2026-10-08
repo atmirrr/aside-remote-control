@@ -31,6 +31,52 @@ export class TelegramChannel extends Channel {
     return res.data;
   }
 
+  // M7: per-channel group policy. groups.mode 'mention' restricts acting in
+  // groups to addressed commands, @bot mentions, and replies to the bot.
+  // requireUserAllowlist gates the sender even when the chat id is allowed.
+  isAuthorized(chatId, userId) {
+    if (!super.isAuthorized(chatId)) return false;
+    const g = this.cfg.groups || {};
+    if (g.requireUserAllowlist) {
+      const allow = (g.allowedUserIds || []).map(String);
+      if (allow.length && userId != null && !allow.includes(String(userId))) return false;
+    }
+    return true;
+  }
+
+  mentionsThisBot(text, msg) {
+    const bot = String(this.cfg.botUsername || '');
+    if (!bot) return false;
+    for (const e of msg.entities || []) {
+      if (e.type === 'mention') {
+        const tok = String(text).slice(e.offset, e.offset + e.length).toLowerCase();
+        if (tok === `@${bot.toLowerCase()}`) return true;
+      }
+    }
+    return new RegExp(`@${bot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(String(text));
+  }
+
+  isReplyToBot(msg) {
+    const from = msg.reply_to_message?.from;
+    return !!from && String(from.username || '').toLowerCase() === String(this.cfg.botUsername || '').toLowerCase();
+  }
+
+  // Returns { text } (mention stripped) when the message should be acted on,
+  // or null when mention-mode group policy says to ignore it.
+  classifyMessage(msg, text) {
+    const chatType = msg.chat?.type === 'private' ? 'private' : 'group';
+    const mode = this.cfg.groups?.mode;
+    if (mode !== 'mention' || chatType === 'private') return { text };
+    const addressed = /^\/[A-Za-z0-9_]+@[A-Za-z0-9_]+/.test(String(text).trim())
+      && this.mentionsThisBot(String(text), msg);
+    if (!addressed && !this.mentionsThisBot(String(text), msg) && !this.isReplyToBot(msg)) return null;
+    const bot = String(this.cfg.botUsername || '');
+    const stripped = bot
+      ? String(text).replace(new RegExp(`@${bot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi'), '').trim()
+      : String(text);
+    return { text: stripped };
+  }
+
   // ---------- setup wizard ----------
   static async setup(io) {
     log.step('\nAdd a Telegram channel');
@@ -154,6 +200,8 @@ export class TelegramChannel extends Channel {
         this.lastPollError = null;
         for (const u of r.result) {
           this.offset = u.update_id + 1;
+          const msg0 = u.message || u.edited_message;
+          if (msg0 && this.classifyMessage(msg0, msg0.text || msg0.caption || '') === null) continue;
           const cq = u.callback_query;
           if (cq) {
             // Button taps: answer first, then flow through the normal message
@@ -179,19 +227,24 @@ export class TelegramChannel extends Channel {
           const text = msg.text || msg.caption || '';
           const attachments = this.attachmentsOf(msg);
           if (!text && !attachments.length) continue; // stickers, joins, pins, ...
+          const classified = this.classifyMessage(msg, text);
+          const mentionsBot = this.mentionsThisBot(text, msg);
+          const isReplyToBot = this.isReplyToBot(msg);
 
           if (msg.media_group_id && attachments.length) {
-            this.bufferAlbum(msg, text, attachments, onMessage);
+            this.bufferAlbum(msg, classified.text, attachments, onMessage);
             continue;
           }
           await onMessage({
             chatId: msg.chat.id,
-            text,
+            text: classified.text,
             attachments,
             messageId: msg.message_id,
             from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
             userId: String(msg.from?.id ?? ''),
             chatType: msg.chat.type === 'private' ? 'private' : 'group',
+            mentionsBot,
+            isReplyToBot,
           });
         }
       } catch (e) {
