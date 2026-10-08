@@ -70,9 +70,14 @@ for (const line of cfg.lines || []) {
   if (cfg.delayMs) await new Promise((r) => setTimeout(r, cfg.delayMs));
 }
 if (cfg.spawnChild) {
-  const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  // Not detached: like a real agent's child, it stays in the fake-aside
+  // process group so the bridge's group kill reaches it. unref() only means
+  // "don't keep this process alive", not "new process group".
+  const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   c.unref();
   writeFileSync(cfg.spawnChild, String(c.pid));
 }
-if (cfg.hang) await new Promise(() => {});
+// Hang forever. The interval keeps a handle alive so Node never trips its
+// "unsettled top-level await" exit on a plain never-resolving promise.
+if (cfg.hang) await new Promise(() => setInterval(() => {}, 1000));
 process.exit(cfg.exit ?? 0);

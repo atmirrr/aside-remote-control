@@ -54,15 +54,87 @@ export class Bridge {
     this.config = config;
     this.agent = new Agent(config.agent);
     this.transcribe = transcribe; // swappable for tests
-    this.queues = new Map(); // chatId -> Promise chain
+    // Control plane: a global FIFO of submitted tasks plus the running set,
+    // keyed channelId:chatId. maxConcurrent caps parallel agent processes;
+    // maxQueuePerChat caps one chat's backlog.
+    this.queue = [];
+    this.running = new Map();
+    this.active = 0;
     this.controller = new AbortController();
   }
 
-  enqueue(chatId, task) {
-    const prev = this.queues.get(chatId) || Promise.resolve();
-    const next = prev.then(task, task);
-    this.queues.set(chatId, next.catch(() => {}));
-    return next;
+  chatKey(channel, chatId) {
+    return `${channel.id}:${chatId}`;
+  }
+
+  // Submit a task. Runs immediately when the chat is idle and capacity allows,
+  // otherwise queues it (replying ⏳ Queued (#n)) or refuses when the per-chat
+  // backlog is full. The returned promise resolves when the task has finished
+  // (or was dropped).
+  submitTask(channel, msg) {
+    const key = this.chatKey(channel, msg.chatId);
+    const cap = this.config.agent?.maxQueuePerChat ?? 5;
+    const pending = this.queue.filter((i) => i.key === key).length;
+    if (pending >= cap) {
+      return channel.sendText(msg.chatId, `Queue is full (${cap}). /cancel to clear.`);
+    }
+    return new Promise((resolve) => {
+      const item = {
+        key, channel, msg, resolve, queuedAt: Date.now(),
+        abortController: new AbortController(), startedAt: null, promise: null,
+      };
+      this.queue.push(item);
+      if (this.running.has(key) || this.active >= (this.config.agent?.maxConcurrent ?? 1)) {
+        channel.sendText(msg.chatId, `⏳ Queued (#${this.queue.length})`).catch(() => {});
+      }
+      this.pump();
+    });
+  }
+
+  // Start as many queued tasks as the global cap allows, FIFO across chats
+  // (skipping tasks whose chat already has one running, so per-chat order is
+  // preserved).
+  pump() {
+    const cap = this.config.agent?.maxConcurrent ?? 1;
+    while (this.active < cap && this.queue.length) {
+      const idx = this.queue.findIndex((i) => !this.running.has(i.key));
+      if (idx === -1) break;
+      const item = this.queue.splice(idx, 1)[0];
+      this.active += 1;
+      this.running.set(item.key, item);
+      item.startedAt = Date.now();
+      item.promise = this.runTaskBody(item).finally(() => {
+        this.active -= 1;
+        this.running.delete(item.key);
+        item.resolve();
+        this.pump();
+      });
+    }
+  }
+
+  dropQueued(key) {
+    const dropped = this.queue.filter((i) => i.key === key);
+    for (const it of dropped) it.resolve();
+    this.queue = this.queue.filter((i) => i.key !== key);
+    return dropped.length;
+  }
+
+  queuedFor(key) {
+    return this.queue.filter((i) => i.key === key);
+  }
+
+  // Abort this chat's running task and drop its pending queue.
+  cancelChat(key) {
+    const r = this.running.get(key);
+    const dropped = this.dropQueued(key);
+    if (r) r.abortController.abort();
+    return { hadRunning: !!r, dropped, startedAt: r?.startedAt ?? null };
+  }
+
+  // Shutdown: stop channels and abort every running task (group kill).
+  abortAll() {
+    this.controller.abort();
+    for (const item of this.running.values()) item.abortController.abort();
   }
 
   // Build the command context and run a registry command. Command failures
@@ -151,8 +223,15 @@ export class Bridge {
     if (parsed) return this.runCommand(channel, { chatId, userId, from, messageId }, parsed.cmd, parsed.args);
 
     // Real task -> run in order for this chat.
-    return this.enqueue(chatId, async () => {
-      const started = Date.now();
+    return this.submitTask(channel, { chatId, text, attachments, messageId, from });
+  }
+
+  // Run one queued task end-to-end: attachments, agent, streaming, history.
+  // The item's abortController.signal cancels the agent (group kill).
+  async runTaskBody(item) {
+    const { channel, msg, abortController } = item;
+    const { chatId, text = '', attachments = [], messageId, from } = msg;
+    const started = item.startedAt;
       await channel.sendTyping(chatId);
       // Downloading and transcribing happen before the agent starts, and can take
       // a few seconds, so keep the indicator alive from here rather than later.
@@ -226,24 +305,35 @@ export class Bridge {
           flushTimer = setTimeout(() => { flushTimer = null; pushEdit(); }, throttle);
         } : undefined;
 
-        let res = await this.agent.run({ prompt, sessionId: sid, onData });
+        let res = await this.agent.run({ prompt, sessionId: sid, onData, signal: abortController.signal });
         // Self-heal: if the stored session id was rejected (expired/unknown/bad),
         // forget it and retry once as a fresh session instead of failing forever.
-        if (res.sessionMissing && sid) {
+        if (!res.cancelled && res.sessionMissing && sid) {
           log.warn(`[${channel.id}] session "${sid}" was rejected; starting a fresh one and retrying`);
           sessions.clear(channel.id, chatId);
           acc = '';
-          res = await this.agent.run({ prompt, sessionId: null, onData });
+          res = await this.agent.run({ prompt, sessionId: null, onData, signal: abortController.signal });
         }
         const secs = ((Date.now() - started) / 1000).toFixed(1);
         log.info(`[${channel.id}] task finished in ${secs}s (exit=${res.code}, ${String(res.text || '').length} chars)`);
-        if (res.sessionId && res.sessionId !== sid) sessions.set(channel.id, chatId, res.sessionId);
+        if (!res.cancelled && res.sessionId && res.sessionId !== sid) sessions.set(channel.id, chatId, res.sessionId);
 
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
         // Default: show just the answer (strip the Thinking/tool transcript) and
         // render its markdown. verbose: forward the raw transcript as plain text.
         let finalText = res.text || '(no output)';
-        if (res.stalled || res.code < 0) {
+        if (res.cancelled) {
+          // Cancelled: replace the placeholder with the marker (streaming) or
+          // send it as the final message. No history, no session, no images.
+          const marker = '🛑 Cancelled.';
+          if (streaming) {
+            while (editing) await sleep(20);
+            try { await channel.editText(chatId, msgId, marker); editCount++; }
+            catch { await channel.sendText(chatId, marker); }
+          } else {
+            await channel.sendText(chatId, marker);
+          }
+        } else if (res.stalled || res.code < 0) {
           // Bridge-synthesized notice (stall / timeout / launch failure): res.text
           // is already the user-facing message, so show it verbatim instead of
           // running it through extractAnswer (which would strip it as transcript).
@@ -261,32 +351,34 @@ export class Bridge {
           if (!answer) log.warn(`[${channel.id}] no answer extracted from ${String(res.text || '').length}-char transcript`);
           finalText = answer || '(No answer produced — the task may have stopped early or needed an approval.)';
         }
-        const opts = verbose ? {} : { markdown: true };
-        const parts = chunkText(finalText, 3900);
-        if (streaming) {
-          // Land the final result into the streamed message; overflow as follow-ups.
-          while (editing) await sleep(20);
-          if (parts[0] !== lastShown) {
-            try { await channel.editText(chatId, msgId, parts[0], opts); editCount++; }
-            catch { await channel.sendText(chatId, parts[0], opts); }
+        if (!res.cancelled) {
+          const opts = verbose ? {} : { markdown: true };
+          const parts = chunkText(finalText, 3900);
+          if (streaming) {
+            // Land the final result into the streamed message; overflow as follow-ups.
+            while (editing) await sleep(20);
+            if (parts[0] !== lastShown) {
+              try { await channel.editText(chatId, msgId, parts[0], opts); editCount++; }
+              catch { await channel.sendText(chatId, parts[0], opts); }
+            }
+            for (let i = 1; i < parts.length; i++) await channel.sendText(chatId, parts[i], opts);
+            log.info(`[${channel.id}] streamed ${editCount} edit(s)`);
+          } else {
+            await channel.sendText(chatId, finalText, opts);
           }
-          for (let i = 1; i < parts.length; i++) await channel.sendText(chatId, parts[i], opts);
-          log.info(`[${channel.id}] streamed ${editCount} edit(s)`);
-        } else {
-          await channel.sendText(chatId, finalText, opts);
-        }
-        // Remember this exchange (the clean answer, not the raw transcript) so the
-        // next message can resolve follow-up references. Store the composed text,
-        // not the raw one: for a voice note that's the transcript, and for files
-        // it's their paths — so "summarize that pdf again" still resolves.
-        if (useContext) {
-          history.append(channel.id, chatId, 'user', messageText, ctxMax);
-          const cleanAnswer = extractAnswer(res.raw || res.text || '');
-          if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
-        }
-        // Best-effort: attach any image artifacts the agent referenced.
-        for (const img of findImagePaths(res.text)) {
-          try { await channel.sendImage(chatId, img.replace(/^~(?=\/)/, process.env.HOME || '~')); } catch {}
+          // Remember this exchange (the clean answer, not the raw transcript) so the
+          // next message can resolve follow-up references. Store the composed text,
+          // not the raw one: for a voice note that's the transcript, and for files
+          // it's their paths — so "summarize that pdf again" still resolves.
+          if (useContext) {
+            history.append(channel.id, chatId, 'user', messageText, ctxMax);
+            const cleanAnswer = extractAnswer(res.raw || res.text || '');
+            if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
+          }
+          // Best-effort: attach any image artifacts the agent referenced.
+          for (const img of findImagePaths(res.text)) {
+            try { await channel.sendImage(chatId, img.replace(/^~(?=\/)/, process.env.HOME || '~')); } catch {}
+          }
         }
       } catch (e) {
         const msg = `Error running task: ${e.message}`;
@@ -296,7 +388,6 @@ export class Bridge {
         if (flushTimer) clearTimeout(flushTimer);
         clearInterval(keepTyping);
       }
-    });
   }
 
   async start(channelFilter) {
@@ -320,11 +411,27 @@ export class Bridge {
       });
       return channel.start({
         signal,
-        onMessage: (msg) => this.handleMessage(channel, msg),
+        // Never return the task promise here: the poll loop must keep reading
+        // updates while a task runs, or /cancel and friends would starve.
+        onMessage: (msg) => {
+          this.handleMessage(channel, msg).catch((e) => log.warn(`[${channel.id}] message failed: ${e.message}`));
+        },
       });
     });
 
-    const stop = () => { log.info('\nStopping...'); this.controller.abort(); };
+    let stopping = false;
+    const stop = () => {
+      if (stopping) process.exit(0); // second signal: exit immediately
+      stopping = true;
+      log.info('\nStopping...');
+      this.abortAll();
+      const taskSettled = [...this.running.values()].map((i) => i.promise).filter(Boolean);
+      // Give channel loops and in-flight tasks up to 5 s to settle, then exit 0.
+      Promise.race([
+        Promise.allSettled([...runners, ...taskSettled]),
+        sleep(5000),
+      ]).then(() => process.exit(0));
+    };
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
 

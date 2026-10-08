@@ -18,10 +18,25 @@ export class Agent {
     return [...base, prompt];
   }
 
-  // Runs one task. Resolves with { text, sessionId, code }.
+  // Kill the child and everything it spawned. The agent is spawned detached
+  // (its own process group), so a group kill also takes down grandchildren the
+  // plain child.kill would orphan — including the aside process hiding behind
+  // the pty wrapper. SIGTERM first, SIGKILL after a grace period; if the group
+  // kill throws (no group, no process), fall back to child.kill.
+  static killGroup(child, { graceMs = 3000 } = {}) {
+    const sig = (s) => {
+      try { process.kill(-child.pid, s); } catch { try { child.kill(s); } catch {} }
+    };
+    sig('SIGTERM');
+    const t = setTimeout(() => sig('SIGKILL'), graceMs);
+    if (t.unref) t.unref();
+  }
+
+  // Runs one task. Resolves with { text, sessionId, code } — or, when the
+  // signal aborts, { cancelled: true, code: -4, text, raw }.
   // timeoutMs overrides the configured hard cap for this call (e.g. the short
   // reply-formatting pass shouldn't inherit the 30-minute task timeout).
-  run({ prompt, sessionId = null, onData, timeoutMs, idleTimeoutMs } = {}) {
+  run({ prompt, sessionId = null, onData, timeoutMs, idleTimeoutMs, signal } = {}) {
     const limitMs = timeoutMs ?? this.cfg.timeoutMs ?? 1800000;
     // Idle/stall cap: kill early if the agent emits no output for this long (0
     // disables). The agent normally streams "Thinking"/tool-call lines steadily,
@@ -45,7 +60,9 @@ export class Agent {
       let child;
       try {
         // Ignore stdin so a non-TTY agent can never hang waiting for input.
-        child = spawn(command, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+        // detached: true puts the child in its own process group so a cancel
+        // can kill the whole tree (see killGroup), not just the pty wrapper.
+        child = spawn(command, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
       } catch (e) {
         return resolve({ text: `Failed to launch agent (${command}): ${e.message}`, sessionId, code: -1, error: true });
       }
@@ -55,7 +72,7 @@ export class Agent {
         if (!settled) {
           settled = true;
           clearTimeout(idleTimer);
-          try { child.kill('SIGKILL'); } catch {}
+          Agent.killGroup(child);
           const partial = clean(out);
           resolve({ text: `${partial}\n\n[aside-remote] Task timed out after ${Math.round(limitMs / 1000)}s.`.trim(), sessionId, code: -2, error: true });
         }
@@ -69,7 +86,7 @@ export class Agent {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          try { child.kill('SIGKILL'); } catch {}
+          Agent.killGroup(child);
           const note = `[aside-remote] The agent went silent for ${Math.round(idleMs / 1000)}s and looks stuck — most likely it hit a local approval Aside can't grant in remote mode (e.g. writing to memory or editing a file). Run this one in the Aside desktop app, or keep remote tasks read-only.`;
           // text is the user-facing notice; raw keeps the partial transcript for
           // verbose/debug and history. The bridge shows this verbatim (see below).
@@ -77,6 +94,20 @@ export class Agent {
         }, idleMs);
       };
       armIdle();
+
+      // Cancellation: the bridge aborts the signal on /cancel and shutdown.
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(idleTimer);
+        Agent.killGroup(child);
+        resolve({ cancelled: true, code: -4, text: 'Task cancelled.', raw: out, sessionId });
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       child.stdout?.on('data', (d) => { const s = d.toString(); out += s; armIdle(); onData?.(s); });
       child.stderr?.on('data', (d) => { err += d.toString(); armIdle(); });

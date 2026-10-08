@@ -49,6 +49,8 @@ export function makeBridge({ fakeAside = {}, channel, agent = {} } = {}) {
       stream: false,
       context: true,
       contextMaxChars: 2000,
+      maxConcurrent: 1,
+      maxQueuePerChat: 5,
       ...agent,
     },
     voice: { enabled: false },

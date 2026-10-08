@@ -13,6 +13,12 @@ export function getChannelClass(type) {
   return REGISTRY.get(type) || null;
 }
 
+// Register an additional channel implementation (used by new channel modules
+// and by tests that need to inject a fake channel).
+export function registerChannel(C) {
+  REGISTRY.set(C.type, C);
+}
+
 export function createChannel(cfg) {
   const C = getChannelClass(cfg.type);
   if (!C) throw new Error(`Unknown channel type: ${cfg.type}`);

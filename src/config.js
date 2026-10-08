@@ -36,6 +36,11 @@ export const DEFAULT_CONFIG = {
     // stored id is ever rejected, but a bad regex still wastes a retry per turn.
     sessionRegex: null,
     timeoutMs: 1800000,      // 30 min hard cap per task
+    // Control plane. maxConcurrent caps agent processes running at once across
+    // all chats (1 keeps today's serial behaviour); maxQueuePerChat caps one
+    // chat's backlog before the bridge refuses with "Queue is full".
+    maxConcurrent: 1,
+    maxQueuePerChat: 5,
     // Idle/stall cap: if the agent streams nothing for this many ms, assume it's
     // wedged and kill it early with an explanatory reply, instead of hanging to
     // timeoutMs. This is what catches the common case where the agent blocks on a

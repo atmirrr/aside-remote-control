@@ -173,8 +173,10 @@ Notes:
 | Message | Effect |
 | --- | --- |
 | `/help` | Show help |
+| `/cancel` | Stop the running task and drop queued ones |
+| `/queue` | Show pending tasks; `/queue clear` drops them |
 | `/new` | Start a fresh agent session (drop context) |
-| `/status` | Show the current session id |
+| `/status` | Show session id, running task, and queue |
 | `/whoami` | Show your chat id (handy when authorizing) |
 | a voice note | Transcribed, then run as a task |
 | a file or photo | Downloaded, then handed to the agent as a task |
@@ -204,6 +206,8 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
     "sessionRegex": null,
     "timeoutMs": 1800000,
     "idleTimeoutMs": 420000,
+    "maxConcurrent": 1,
+    "maxQueuePerChat": 5,
     "stream": true,
     "streamThrottleMs": 1800,
     "verbose": false,
@@ -241,6 +245,11 @@ Every visible command is published as the bot's Telegram menu at startup:
   instead of hanging out the full `timeoutMs`. This is what catches the common
   case where the agent blocks on a **local approval** — see
   [Enabling remote writes](#enabling-remote-writes) above.
+- `maxConcurrent` / `maxQueuePerChat`: the control plane. `maxConcurrent` caps
+  agent processes running at once across all chats (`1` keeps the old serial
+  behaviour); `maxQueuePerChat` caps one chat's backlog — beyond it the bridge
+  replies `Queue is full`. `/cancel` stops the running task (killing the whole
+  process group) and drops the queue; `/queue` lists it.
 - `stream` / `streamThrottleMs`: when `true` (default), the bot sends a
   placeholder and edits it in place as the agent streams output, at most once
   per `streamThrottleMs` (to respect platform edit rate limits). Set
@@ -373,8 +382,10 @@ against the `Channel` interface, so no other file needs changes.
   [Enabling remote writes](#enabling-remote-writes)). A true in-chat
   approve/deny isn't possible until Aside exposes a headless permission mode on
   `aside exec` — the request currently surfaces nowhere the bridge can see it.
-- `/cancel` — stop a running task without waiting for the timeout.
-- Concurrency caps (per-chat and global) on spawned agent processes.
+- ~~`/cancel` — stop a running task without waiting for the timeout.~~
+  Shipped: `/cancel` (group-kills the agent tree) + `/queue` (see In-chat commands).
+- ~~Concurrency caps (per-chat and global) on spawned agent processes.~~
+  Shipped: `agent.maxConcurrent`, `agent.maxQueuePerChat`.
 
 **More channels** (each is just a new `Channel` subclass — see below)
 

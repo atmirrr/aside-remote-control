@@ -62,6 +62,10 @@ export function helpText() {
 }
 
 // ---- built-ins (migrated from bridge.js; replies stay byte-identical) ----
+const preview = (t) => {
+  const s = String(t ?? '').replace(/\s+/g, ' ').trim();
+  return s.length > 60 ? `${s.slice(0, 60)}…` : s;
+};
 
 defineCommand({
   name: 'help',
@@ -74,6 +78,8 @@ defineCommand({
   name: 'new',
   description: 'start a fresh agent session (forget context)',
   run: (ctx) => {
+    // Cancel first: a finishing task would otherwise re-populate history.
+    ctx.bridge.cancelChat(`${ctx.channel.id}:${ctx.chatId}`);
     sessions.clear(ctx.channel.id, ctx.chatId);
     history.clear(ctx.channel.id, ctx.chatId);
     return ctx.reply('Started a fresh session. Send your task.');
@@ -81,11 +87,50 @@ defineCommand({
 });
 
 defineCommand({
+  name: 'cancel',
+  description: 'stop the running task and drop queued ones',
+  run: (ctx) => {
+    const { hadRunning, dropped, startedAt } = ctx.bridge.cancelChat(`${ctx.channel.id}:${ctx.chatId}`);
+    if (hadRunning) {
+      const ran = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      return ctx.reply(`🛑 Cancelled (ran ${ran}s).${dropped ? ` Dropped ${dropped} queued.` : ''}`);
+    }
+    if (dropped) return ctx.reply(`Dropped ${dropped} queued.`);
+    return ctx.reply('Nothing is running.');
+  },
+});
+
+defineCommand({
+  name: 'queue',
+  description: 'show pending tasks (/queue clear drops them)',
+  run: (ctx, args) => {
+    const key = `${ctx.channel.id}:${ctx.chatId}`;
+    if (String(args).trim().toLowerCase() === 'clear') {
+      const dropped = ctx.bridge.dropQueued(key);
+      return ctx.reply(dropped ? `Dropped ${dropped} queued.` : 'Queue is empty.');
+    }
+    const items = ctx.bridge.queuedFor(key);
+    if (!items.length) return ctx.reply('Queue is empty.');
+    const now = Date.now();
+    const rows = items.map((it, i) => `#${i + 1} ${Math.max(1, Math.round((now - it.queuedAt) / 1000))}s: ${preview(it.msg.text)}`);
+    return ctx.reply(rows.join('\n'));
+  },
+});
+
+defineCommand({
   name: 'status',
-  description: 'show the current session id',
+  description: 'show session id, running task, and queue',
   run: (ctx) => {
     const sid = sessions.get(ctx.channel.id, ctx.chatId);
-    return ctx.reply(sid ? `Active session: ${sid}` : 'No active session yet. Send a task to start one.');
+    const lines = [sid ? `Active session: ${sid}` : 'No active session yet. Send a task to start one.'];
+    const key = `${ctx.channel.id}:${ctx.chatId}`;
+    const running = ctx.bridge.running.get(key);
+    if (running) {
+      lines.push(`Running: ${Math.max(1, Math.round((Date.now() - running.startedAt) / 1000))}s — ${preview(running.msg.text)}`);
+    }
+    const queued = ctx.bridge.queuedFor(key).length;
+    if (queued) lines.push(`Queued: ${queued}`);
+    return ctx.reply(lines.join('\n'));
   },
 });
 
