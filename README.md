@@ -183,6 +183,9 @@ Notes:
 | `/retry` | Re-run this chat's last task |
 | `/undo` | Remove the last exchange from history |
 | `/history` | Show recent turns (`/history [n]`, max 20) |
+| `/sessions` | List Aside sessions; bound one is marked (`/sessions [n]`) |
+| `/resume` | Bind this chat to an Aside session (`/resume <id>`) |
+| `/steer` | Interrupt the running task with new instructions |
 | `/new` | Start a fresh agent session (drop context) |
 | `/status` | Show session id, running task, and queue |
 | `/whoami` | Show chat id, user id, role, and chat type |
@@ -211,8 +214,8 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   "agent": {
     "command": "aside",
     "newArgs": ["exec"],
-    "continueArgs": ["--session", "{session}"],
-    "sessionRegex": null,
+    "continueArgs": ["session", "resume", "{session}"],
+    "sessionRegex": "created new session: ([A-Za-z0-9_-]{8,64})",
     "timeoutMs": 1800000,
     "idleTimeoutMs": 420000,
     "maxConcurrent": 1,
@@ -259,12 +262,11 @@ Roles and permission gating:
 - `command` / `newArgs` / `continueArgs`: how the agent is invoked. The user's
   message is appended as the final argument. `{session}` is substituted with the
   recovered session id when continuing.
-- `sessionRegex`: how a session id is recovered from CLI output for continuity.
-  **Disabled (`null`) by default** because the current Aside CLI doesn't print a
-  session id to stdout — and a loose regex matches ordinary words in the agent's
-  prose, storing a bogus id that gets rejected on the next message. Set it only
-  if your agent CLI emits a session id in a stable, unambiguous form. If a stored
-  id is ever rejected, the bridge drops it and retries as a fresh session.
+- `sessionRegex`: how a session id is recovered from CLI output. The default
+  matches the verified `created new session: <16-char id>` line (see
+  [docs/aside-cli-notes.md](docs/aside-cli-notes.md)). While a session is
+  bound, the CLI resumes it server-side (no client-side history replay); a
+  rejected id self-heals into a fresh session.
 - `timeoutMs` / `idleTimeoutMs`: two independent kill switches. `timeoutMs` is
   the hard cap on total task time (30 min). `idleTimeoutMs` is a stall detector:
   if the agent streams **nothing** for this long (7 min default; `0` disables),
@@ -425,8 +427,8 @@ against the `Channel` interface, so no other file needs changes.
   (only `sendPhoto` is wired up today).
 - Local speech-to-text — spawn a `whisper.cpp` binary instead of calling an HTTP
   endpoint, for a fully offline voice path.
-- Per-message model / speed / effort controls (`/model`, `/fast`, `/effort`) —
-  Aside already exposes `--model` / `--speed` / `--effort` / `--account`.
+- ~~Per-message model / speed / effort controls (`/model`, `/fast`, `/effort`) —~~
+  Shipped: per-chat settings (see In-chat commands and `agent.defaults`).
 
 ## License
 

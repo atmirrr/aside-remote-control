@@ -41,8 +41,8 @@ export function makeBridge({ fakeAside = {}, channel, agent = {} } = {}) {
     agent: {
       command: FAKE_ASIDE,
       wrapper: [],
-      newArgs: [],
-      continueArgs: ['--session', '{session}'],
+      newArgs: ['exec'],
+      continueArgs: ['session', 'resume', '{session}'],
       sessionRegex: 'created new session: ([A-Za-z0-9_-]+)',
       timeoutMs: 10000,
       idleTimeoutMs: 0,

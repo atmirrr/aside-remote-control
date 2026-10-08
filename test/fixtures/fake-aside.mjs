@@ -26,7 +26,7 @@ const saveState = (s) => {
   if (statePath) writeFileSync(statePath, JSON.stringify(s));
 };
 
-function handleSession() {
+async function handleSession() {
   const sub = argv[1];
   if (sub === '--help') {
     console.log('Usage: aside session <list|resume|stop|steer|queue|archive|delete>');
@@ -50,6 +50,8 @@ function handleSession() {
     if (!s) { console.log(`no such session: ${id}`); return; }
     console.log(`resuming session ${id}`);
     for (const line of cfg.lines || []) console.log(line);
+    // A resumed session honours hang too, like a fresh task run.
+    if (cfg.hang) await new Promise(() => setInterval(() => {}, 1000));
     return;
   }
   if (sub === 'steer' || sub === 'queue') {
@@ -60,7 +62,12 @@ function handleSession() {
 }
 
 if (argv[0] === 'session') {
-  handleSession();
+  // Emulate a CLI without session support when the test asks for it.
+  if (cfg.noSessions) {
+    console.log('unknown command: session');
+    process.exit(1);
+  }
+  await handleSession();
   process.exit(0);
 }
 

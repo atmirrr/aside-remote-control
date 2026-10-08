@@ -28,3 +28,15 @@ ones into tests/docs/commits.
 - macOS has no `timeout` binary — use the shell's own timeouts.
 - `aside exec --help` confirms `--speed default|fast`, `--effort` (8 levels),
   `--permission ask|guard|full-access`, `--model provider/model`.
+
+## U2 — `aside session stop`: usable, running-case unverified
+
+Probe 3 (last of the budget): fresh `aside exec` session → `aside session
+stop <id>` exited 0 and accepted the id, but an **idle** session stayed listed
+as idle afterwards. Whether stop halts a *running* task could not be probed
+within budget — the bridge calls it after the group kill anyway (kill is the
+primary mechanism; stop is a best-effort server-side complement, failures are
+log.warn only).
+
+Also observed: probe sessions list as `ephemeral` (third column is not always
+`persistent`); the session-line parser tolerates both plus a missing timestamp.

@@ -29,15 +29,13 @@ export const DEFAULT_CONFIG = {
     // would otherwise run that subcommand). See docs/aside-cli-notes.md (U3).
     newArgs: ['exec'],
     // Args used to *continue* a session. "{session}" is replaced with the id.
-    continueArgs: ['--session', '{session}'],
-    // Regex (string) used to recover a session id from CLI output for continuity.
-    // Disabled by default: the current Aside CLI does not print a session id to
-    // stdout, and a prose-matching regex captures ordinary words (e.g. the text
-    // after "session ...") as a fake id, which then gets rejected on the next
-    // message ("Session not found"). Set this only if your agent CLI prints a
-    // session id in a stable, unambiguous form. The bridge self-heals if a
-    // stored id is ever rejected, but a bad regex still wastes a retry per turn.
-    sessionRegex: null,
+    // The CLI resumes server-side, so the session owns its context while bound.
+    continueArgs: ['session', 'resume', '{session}'],
+    // Regex (string) used to recover a session id from CLI output for
+    // continuity. Verified 2026-10-08: a fresh run prints
+    // "created new session: <16-char id>" to stdout (docs/aside-cli-notes.md
+    // U1). The bridge self-heals if a stored id is ever rejected.
+    sessionRegex: 'created new session: ([A-Za-z0-9_-]{8,64})',
     timeoutMs: 1800000,      // 30 min hard cap per task
     // Control plane. maxConcurrent caps agent processes running at once across
     // all chats (1 keeps today's serial behaviour); maxQueuePerChat caps one
@@ -73,11 +71,12 @@ export const DEFAULT_CONFIG = {
     // (like Aside's own chat UI). Set verbose:true to forward the full raw
     // transcript instead.
     verbose: false,
-    // Conversation continuity. The Aside CLI can't resume a session id, so we
-    // replay context client-side: recent turns are prepended to each prompt so
-    // follow-ups ("summarize that", "the second one") work. Bounded by a
-    // character budget (not a turn count) so prompts can't grow unbounded.
-    // /new clears it. Set context:false to make every message independent.
+    // Conversation continuity. When a session is bound the CLI resumes it
+    // server-side (the session owns its context — no client-side replay).
+    // Otherwise recent turns are prepended to each prompt so follow-ups
+    // ("summarize that", "the second one") work. Bounded by a character budget
+    // (not a turn count) so prompts can't grow unbounded. /new clears it. Set
+    // context:false to make every message independent.
     context: true,
     contextMaxChars: 2000,
   },

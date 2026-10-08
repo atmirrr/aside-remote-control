@@ -8,6 +8,7 @@ import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
 import { sessions, history, attachmentsDir, settings } from './config.js';
 import { parseCommand, listCommands } from './chat-commands.js';
+import { makeAsideCli } from './aside-cli.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
 import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
 
@@ -61,6 +62,7 @@ export class Bridge {
     this.running = new Map();
     this.active = 0;
     this.lastTasks = new Map(); // chatKey -> last composed task (for /retry)
+    this.aside = makeAsideCli(config.agent.command); // session queries (M4)
     this.controller = new AbortController();
   }
 
@@ -308,8 +310,9 @@ export class Bridge {
           effort: this.effectiveSetting(channel, chatId, 'effort'),
           permission: this.effectiveSetting(channel, chatId, 'permission'),
         };
-        // Conversation continuity: prepend recent turns as context (client-side).
-        const useContext = this.config.agent?.context !== false;
+        // Conversation continuity: while a session is bound the CLI resumes it
+        // server-side (no client-side replay); otherwise prepend recent turns.
+        const useContext = this.config.agent?.context !== false && !sid;
         const ctxMax = this.config.agent?.contextMaxChars ?? 2000;
         const prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
         // Remember the composed task so /retry can re-run it.

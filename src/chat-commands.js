@@ -5,6 +5,7 @@
 // Entry shape: { name, description, usage?, admin?, hidden?, aliases?, run(ctx, args) }
 // where ctx = { bridge, channel, chatId, userId, from, role, reply(text, opts) }.
 import { sessions, history, settings } from './config.js';
+import { log } from './util.js';
 
 const registry = [];
 
@@ -89,8 +90,17 @@ defineCommand({
 defineCommand({
   name: 'cancel',
   description: 'stop the running task and drop queued ones',
-  run: (ctx) => {
-    const { hadRunning, dropped, startedAt } = ctx.bridge.cancelChat(`${ctx.channel.id}:${ctx.chatId}`);
+  run: async (ctx) => {
+    const key = `${ctx.channel.id}:${ctx.chatId}`;
+    const sid = sessions.get(ctx.channel.id, ctx.chatId);
+    const { hadRunning, dropped, startedAt } = ctx.bridge.cancelChat(key);
+    // Best effort: after the local group kill, ask the CLI to stop the session
+    // server-side too (U2: stop accepts ids; running-case unverified).
+    if (hadRunning && sid) {
+      ctx.bridge.aside.stopSession(sid).then((ok) => {
+        if (!ok) log.warn(`[${ctx.channel.id}] session stop failed for ${sid}`);
+      }).catch(() => {});
+    }
     if (hadRunning) {
       const ran = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       return ctx.reply(`🛑 Cancelled (ran ${ran}s).${dropped ? ` Dropped ${dropped} queued.` : ''}`);
@@ -290,5 +300,66 @@ defineCommand({
     if (!turns.length) return ctx.reply('No history yet.');
     const rows = turns.map((t, i) => `${i + 1}. ${t.role === 'user' ? 'User' : 'Assistant'}: ${String(t.text).slice(0, 200)}`);
     return ctx.reply(rows.join('\n'));
+  },
+});
+
+// ---- Aside session integration (M4) ----
+const NO_SESSION_SUPPORT = 'This Aside CLI has no session support.';
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+const requireSessions = async (ctx) => {
+  if (!(await ctx.bridge.aside.supportsSessions())) return false;
+  return true;
+};
+
+defineCommand({
+  name: 'sessions',
+  description: 'list recent Aside sessions (/sessions [n], max 20)',
+  run: async (ctx, args) => {
+    if (!(await requireSessions(ctx))) return ctx.reply(NO_SESSION_SUPPORT);
+    const n = Math.min(Math.max(parseInt(String(args).trim(), 10) || 8, 1), 20);
+    const r = await ctx.bridge.aside.listSessions();
+    if (!r.ok) return ctx.reply(`Couldn't list sessions: ${r.error}`);
+    const bound = sessions.get(ctx.channel.id, ctx.chatId);
+    const rows = r.rows.slice(0, n).map((s) => {
+      const line = s.raw ? s.raw : `${s.id} ${s.state} ${(s.title || '').slice(0, 40)}`;
+      return s.id === bound ? `${line}  ← bound` : line;
+    });
+    if (!rows.length) return ctx.reply('No sessions found.');
+    return ctx.reply(rows.join('\n'));
+  },
+});
+
+defineCommand({
+  name: 'resume',
+  description: 'bind this chat to an Aside session (/resume <id>)',
+  run: async (ctx, args) => {
+    if (!(await requireSessions(ctx))) return ctx.reply(NO_SESSION_SUPPORT);
+    const id = String(args).trim();
+    if (!SESSION_ID_RE.test(id)) return ctx.reply('Usage: /resume <id> — 8–64 chars of letters, digits, _ or -');
+    const r = await ctx.bridge.aside.listSessions();
+    if (!r.ok) return ctx.reply(`Couldn't list sessions: ${r.error}`);
+    const found = r.rows.find((s) => s.id === id);
+    if (!found) return ctx.reply(`No such session: ${id} (see /sessions).`);
+    sessions.set(ctx.channel.id, ctx.chatId, id);
+    history.clear(ctx.channel.id, ctx.chatId); // the session owns context now
+    return ctx.reply(`Resumed session ${id}.`);
+  },
+});
+
+defineCommand({
+  name: 'steer',
+  description: 'interrupt the running task with new instructions (/steer <text>)',
+  run: async (ctx, args) => {
+    if (!(await requireSessions(ctx))) return ctx.reply(NO_SESSION_SUPPORT);
+    const text = String(args).trim();
+    if (!text) return ctx.reply('Usage: /steer <text>');
+    if (!ctx.bridge.running.has(`${ctx.channel.id}:${ctx.chatId}`)) {
+      return ctx.reply('Nothing is running — /steer only interrupts a live task.');
+    }
+    const sid = sessions.get(ctx.channel.id, ctx.chatId);
+    if (!sid) return ctx.reply('No session bound — /resume one first.');
+    const ok = await ctx.bridge.aside.steerSession(sid, text);
+    return ctx.reply(ok ? `Steered ${sid}.` : 'Steer failed — the CLI rejected the request.');
   },
 });
