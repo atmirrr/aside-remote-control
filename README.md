@@ -183,6 +183,9 @@ Notes:
 | `/retry` | Re-run this chat's last task |
 | `/undo` | Remove the last exchange from history |
 | `/history` | Show recent turns (`/history [n]`, max 20) |
+| `/schedule` | Schedule a task (admin: `every`/`daily`/`weekdays`/`weekly`/`cron`/`at`/`in`) |
+| `/jobs` | List scheduled jobs (id, spec, next run, last status) |
+| `/unschedule` | Remove a scheduled job (admin, `/unschedule <id>`) |
 | `/sessions` | List Aside sessions; bound one is marked (`/sessions [n]`) |
 | `/resume` | Bind this chat to an Aside session (`/resume <id>`) |
 | `/steer` | Interrupt the running task with new instructions |
@@ -275,6 +278,20 @@ Outbound files and notifications:
   are logged, never echoed to chat.
 - `notify.doneAfterSec` (default `0` = off): send a short `✅ Done in …`
   message after tasks that ran at least this long (edits don't push-notify).
+
+Scheduler:
+
+```json
+{ "schedule": { "timezone": null, "minIntervalSec": 300, "maxJobsPerChat": 20 } }
+```
+
+- `schedule.timezone` (default `null` = process TZ): IANA zone for schedule
+  wall-clock matching. Nonexistent local times (spring-forward) fire at the
+  next valid minute; ambiguous ones fire once. Missed fires while the bridge
+  was down are skipped.
+- `schedule.minIntervalSec` (300): smallest `every`/`in` interval.
+- `schedule.maxJobsPerChat` (20): per-chat job cap. A job that fails three
+  times in a row disables itself.
 - `permissions.escalation` (default `false`): when `true`, a **stalled** task's
   reply carries a one-tap button that re-runs the same task once with
   `--permission full-access` (the stored setting never changes).

@@ -138,6 +138,13 @@ export const DEFAULT_CONFIG = {
   notify: {
     doneAfterSec: 0,
   },
+  // Scheduler (/schedule, /jobs, /unschedule). timezone: IANA zone or null for
+  // the process TZ. Missed fires while the bridge was down are skipped.
+  schedule: {
+    timezone: null,
+    minIntervalSec: 300,
+    maxJobsPerChat: 20,
+  },
   channels: [],
 };
 
@@ -174,6 +181,7 @@ export function loadConfig() {
     permissions: { ...DEFAULT_CONFIG.permissions, ...(cfg.permissions || {}) },
     outbound: { ...DEFAULT_CONFIG.outbound, ...(cfg.outbound || {}) },
     notify: { ...DEFAULT_CONFIG.notify, ...(cfg.notify || {}) },
+    schedule: { ...DEFAULT_CONFIG.schedule, ...(cfg.schedule || {}) },
     channels: cfg.channels || [],
   };
 }
@@ -253,6 +261,9 @@ export function jsonStore(file, fallback = {}) {
 // permission, verbose }). Effective value = chat setting -> agent.defaults
 // -> unset (CLI default).
 export const settings = jsonStore('settings.json');
+
+// Scheduled jobs (id -> job). See src/scheduler.js for the job shape.
+export const schedules = jsonStore('schedules.json');
 
 // ---- per-chat conversation history (channelId:chatId -> [{role,text}, ...]) ----
 // Client-side context replay for follow-ups. Bounded by a character budget:

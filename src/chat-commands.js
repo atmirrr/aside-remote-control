@@ -6,6 +6,7 @@
 // where ctx = { bridge, channel, chatId, userId, from, role, reply(text, opts) }.
 import { sessions, history, settings } from './config.js';
 import { log } from './util.js';
+import { splitScheduleArgs } from './scheduler.js';
 
 const registry = [];
 
@@ -385,5 +386,54 @@ defineCommand({
       { forcePermission: 'full-access' },
     );
     return ctx.reply('↻ Re-running with full access…');
+  },
+});
+
+// ---- scheduler (M6) ----
+
+defineCommand({
+  name: 'schedule',
+  admin: true,
+  description: 'schedule a task (/schedule <spec> <task…>)',
+  run: (ctx, args) => {
+    const split = splitScheduleArgs(args);
+    if (!split) {
+      return ctx.reply('Usage: /schedule every <n>m|h|d | daily HH:MM | weekdays HH:MM | weekly <day> HH:MM | cron <m> <h> <dom> <mon> <dow> | at YYYY-MM-DD HH:MM | in <n>m|h|d — then the task text.');
+    }
+    const r = ctx.bridge.scheduler.add({
+      channelId: ctx.channel.id,
+      chatId: ctx.chatId,
+      creatorUserId: ctx.userId,
+      specText: split.specText,
+      task: split.task,
+    });
+    if (r.error) return ctx.reply(r.error);
+    return ctx.reply(`Scheduled ${r.job.id} (${r.job.specText}): ${preview(r.job.task)}`);
+  },
+});
+
+defineCommand({
+  name: 'jobs',
+  description: 'list scheduled jobs',
+  run: (ctx) => {
+    const jobs = ctx.bridge.scheduler.list(`${ctx.channel.id}:${ctx.chatId}`);
+    if (!jobs.length) return ctx.reply('No scheduled jobs. /schedule to add one.');
+    const rows = jobs.map((j) => {
+      const next = j.nextRunMs ? new Date(j.nextRunMs).toISOString().replace('T', ' ').slice(0, 16) : 'never';
+      return `#${j.id}  ${j.specText}  next: ${next}  [${j.lastStatus}]  ${preview(j.task)}`;
+    });
+    return ctx.reply(rows.join('\n'));
+  },
+});
+
+defineCommand({
+  name: 'unschedule',
+  admin: true,
+  description: 'remove a scheduled job (/unschedule <id>)',
+  run: (ctx, args) => {
+    const id = String(args).trim();
+    if (!id) return ctx.reply('Usage: /unschedule <id> (see /jobs)');
+    const ok = ctx.bridge.scheduler.remove(id, `${ctx.channel.id}:${ctx.chatId}`);
+    return ctx.reply(ok ? `Unscheduled ${id}.` : `No such job: ${id} (see /jobs).`);
   },
 });

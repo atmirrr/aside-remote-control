@@ -7,7 +7,8 @@ import { randomBytes } from 'node:crypto';
 import { Agent } from './agent.js';
 import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
-import { sessions, history, attachmentsDir, settings, HOME, configPath } from './config.js';
+import { sessions, history, attachmentsDir, settings, schedules, HOME, configPath } from './config.js';
+import { Scheduler } from './scheduler.js';
 import { parseCommand, listCommands } from './chat-commands.js';
 import { makeAsideCli } from './aside-cli.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
@@ -65,6 +66,15 @@ export class Bridge {
     this.lastTasks = new Map(); // chatKey -> last composed task (for /retry)
     this.rerunTokens = new Map(); // token -> { key, messageId, expiresAt } (M5d)
     this.aside = makeAsideCli(config.agent.command); // session queries (M4)
+    this.channelInstances = new Map(); // channelId -> channel (populated by start)
+    const schedCfg = config.schedule || {};
+    this.scheduler = new Scheduler({
+      store: schedules,
+      bridge: this,
+      timezone: schedCfg.timezone ?? null,
+      minIntervalSec: schedCfg.minIntervalSec ?? 300,
+      maxJobsPerChat: schedCfg.maxJobsPerChat ?? 20,
+    });
     this.controller = new AbortController();
   }
 
@@ -128,7 +138,7 @@ export class Bridge {
       item.promise = this.runTaskBody(item).finally(() => {
         this.active -= 1;
         this.running.delete(item.key);
-        item.resolve();
+        item.resolve(item);
         this.pump();
       });
     }
@@ -292,6 +302,8 @@ export class Bridge {
           }
         }
         const messageText = composeMessage(text, transcript, files);
+        // Scheduled turns: no history, no retry memory, ⏰-prefixed replies.
+        const ephemeral = msg.ephemeral === true;
 
         const sid = sessions.get(channel.id, chatId);
         log.info(`[${channel.id}] (${from}) task${sid ? ` [${sid}]` : ' [new]'}: ${messageText.slice(0, 120)}`);
@@ -320,7 +332,7 @@ export class Bridge {
         const ctxMax = this.config.agent?.contextMaxChars ?? 2000;
         const prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
         // Remember the composed task so /retry can re-run it.
-        this.lastTasks.set(item.key, { text: messageText, attachments });
+        if (!ephemeral) this.lastTasks.set(item.key, { text: messageText, attachments });
 
         // Live-edit state: accumulate raw output, push the latest tail on a timer.
         let acc = '';
@@ -398,6 +410,8 @@ export class Bridge {
             finalText += '\n\n🔓 The button re-runs the same task with full access — a fresh attempt; the stalled run is not resumed.';
             opts.buttons = [[{ text: '🔓 Re-run with full access', data: `/rerun ${token}` }]];
           }
+          const schedPrefix = msg.scheduleId ? `⏰ ${msg.scheduleId}: ` : '';
+          if (schedPrefix) finalText = schedPrefix + finalText;
           const parts = chunkText(finalText, 3900);
           if (streaming) {
             // Land the final result into the streamed message; overflow as follow-ups.
@@ -415,7 +429,7 @@ export class Bridge {
           // next message can resolve follow-up references. Store the composed text,
           // not the raw one: for a voice note that's the transcript, and for files
           // it's their paths — so "summarize that pdf again" still resolves.
-          if (useContext) {
+          if (useContext && !ephemeral) {
             history.append(channel.id, chatId, 'user', messageText, ctxMax);
             const cleanAnswer = extractAnswer(res.raw || res.text || '');
             if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
@@ -451,6 +465,7 @@ export class Bridge {
       } finally {
         if (flushTimer) clearTimeout(flushTimer);
         clearInterval(keepTyping);
+        item.result = res; // scheduler reads success/failure from here
         // M5b: separate completion message (edits don't push-notify).
         const doneAfter = Number(this.config.notify?.doneAfterSec) || 0;
         if (doneAfter > 0 && res && res.cancelled !== true) {
@@ -474,6 +489,7 @@ export class Bridge {
     const signal = this.controller.signal;
     const runners = defs.map((def) => {
       const channel = createChannel(def);
+      this.channelInstances.set(channel.id, channel);
       const commandsCfg = this.config.commands || {};
       // Fire-and-forget: registerCommands logs its own failures and must never
       // prevent the poll loop from starting.
@@ -491,11 +507,14 @@ export class Bridge {
       });
     });
 
+    this.scheduler.start();
+
     let stopping = false;
     const stop = () => {
       if (stopping) process.exit(0); // second signal: exit immediately
       stopping = true;
       log.info('\nStopping...');
+      this.scheduler.stop();
       this.abortAll();
       const taskSettled = [...this.running.values()].map((i) => i.promise).filter(Boolean);
       // Give channel loops and in-flight tasks up to 5 s to settle, then exit 0.
