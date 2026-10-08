@@ -24,7 +24,10 @@ export const DEFAULT_CONFIG = {
     // so when piped it prints nothing. "script" gives it a fake TTY we capture.
     wrapper: process.platform === 'darwin' ? ['script', '-q', '/dev/null'] : [],
     // Args used to *start* a new session. The prompt is appended as the last arg.
-    newArgs: [],
+    // Default routes through `aside exec`, which makes the first positional
+    // unambiguously the prompt (a one-word prompt equal to a root subcommand
+    // would otherwise run that subcommand). See docs/aside-cli-notes.md (U3).
+    newArgs: ['exec'],
     // Args used to *continue* a session. "{session}" is replaced with the id.
     continueArgs: ['--session', '{session}'],
     // Regex (string) used to recover a session id from CLI output for continuity.
@@ -41,6 +44,16 @@ export const DEFAULT_CONFIG = {
     // chat's backlog before the bridge refuses with "Queue is full".
     maxConcurrent: 1,
     maxQueuePerChat: 5,
+    // Per-chat option fallbacks. Effective value = chat setting (settings.json)
+    // -> agent.defaults.<field> -> unset (the CLI's own default). verbose is
+    // bridge-side; the others become --model/--speed/--effort/--permission argv.
+    defaults: {
+      model: null,
+      speed: null,
+      effort: null,
+      permission: null,
+      verbose: null,
+    },
     // Idle/stall cap: if the agent streams nothing for this many ms, assume it's
     // wedged and kill it early with an explanatory reply, instead of hanging to
     // timeoutMs. This is what catches the common case where the agent blocks on a
@@ -99,6 +112,16 @@ export const DEFAULT_CONFIG = {
     // "~/.aside/u/0/agents/main/inbox") sidesteps the grant entirely.
     dir: null,
   },
+  // Identity and authorization. admins: user ids allowed to run admin-flagged
+  // commands; empty/absent means every authorized sender is admin (I8).
+  roles: {
+    admins: [],
+  },
+  // Gates for chat-driven capability changes. allowChatOverride must be true
+  // before /permission (and friends) can change how tasks run.
+  permissions: {
+    allowChatOverride: false,
+  },
   channels: [],
 };
 
@@ -131,6 +154,8 @@ export function loadConfig() {
     agent: { ...DEFAULT_CONFIG.agent, ...(cfg.agent || {}) },
     voice: { ...DEFAULT_CONFIG.voice, ...(cfg.voice || {}) },
     attachments: { ...DEFAULT_CONFIG.attachments, ...(cfg.attachments || {}) },
+    roles: { ...DEFAULT_CONFIG.roles, ...(cfg.roles || {}) },
+    permissions: { ...DEFAULT_CONFIG.permissions, ...(cfg.permissions || {}) },
     channels: cfg.channels || [],
   };
 }
@@ -183,6 +208,34 @@ export const sessions = {
   },
 };
 
+// ---- small JSON map store, used by NEW stores only (settings.json, ...) ----
+// Same atomic write pattern as the rest of the state. Do not migrate
+// sessions/history onto this.
+export function jsonStore(file, fallback = {}) {
+  const p = path.join(HOME, file);
+  return {
+    get(k) {
+      const m = readJson(p, fallback);
+      return k === undefined ? m : (m[k] ?? null);
+    },
+    set(k, v) {
+      const m = readJson(p, fallback);
+      m[k] = v;
+      writeJson(p, m);
+    },
+    clear(k) {
+      const m = readJson(p, fallback);
+      delete m[k];
+      writeJson(p, m);
+    },
+  };
+}
+
+// Per-chat option settings (channelId:chatId -> { model, speed, effort,
+// permission, verbose }). Effective value = chat setting -> agent.defaults
+// -> unset (CLI default).
+export const settings = jsonStore('settings.json');
+
 // ---- per-chat conversation history (channelId:chatId -> [{role,text}, ...]) ----
 // Client-side context replay for follow-ups. Bounded by a character budget:
 // each turn is truncated, and oldest turns are dropped once the total exceeds
@@ -211,5 +264,18 @@ export const history = {
     const m = loadHistory();
     delete m[key(channelId, chatId)];
     saveHistory(m);
+  },
+  // Remove the last user+assistant pair (up to two entries from the tail).
+  // Returns them as [user, assistant] in chronological order, or null.
+  pop(channelId, chatId) {
+    const m = loadHistory();
+    const k = key(channelId, chatId);
+    const arr = m[k] || [];
+    if (!arr.length) return null;
+    const removed = [];
+    while (removed.length < 2 && arr.length) removed.push(arr.pop());
+    m[k] = arr;
+    saveHistory(m);
+    return removed.reverse();
   },
 };

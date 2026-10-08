@@ -170,6 +170,8 @@ export class TelegramChannel extends Channel {
             attachments,
             messageId: msg.message_id,
             from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
+            userId: String(msg.from?.id ?? ''),
+            chatType: msg.chat.type === 'private' ? 'private' : 'group',
           });
         }
       } catch (e) {
@@ -192,6 +194,8 @@ export class TelegramChannel extends Channel {
       chatId: msg.chat.id,
       messageId: msg.message_id,
       from: msg.from?.username || msg.from?.first_name || String(msg.from?.id || ''),
+      userId: String(msg.from?.id ?? ''),
+      chatType: msg.chat.type === 'private' ? 'private' : 'group',
       text: '',
       attachments: [],
       timer: null,

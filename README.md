@@ -175,9 +175,17 @@ Notes:
 | `/help` | Show help |
 | `/cancel` | Stop the running task and drop queued ones |
 | `/queue` | Show pending tasks; `/queue clear` drops them |
+| `/model` | Set the agent model for this chat (`/model reset` clears) |
+| `/fast` | Toggle fast model speed (`on`/`off`/`reset`) |
+| `/effort` | Set thinking effort (`off`…`ultrabrowse`, `reset`) |
+| `/verbose` | Show the raw transcript (`on`/`off`/`reset`) |
+| `/permission` | Override agent permission (admin; opt-in via config) |
+| `/retry` | Re-run this chat's last task |
+| `/undo` | Remove the last exchange from history |
+| `/history` | Show recent turns (`/history [n]`, max 20) |
 | `/new` | Start a fresh agent session (drop context) |
 | `/status` | Show session id, running task, and queue |
-| `/whoami` | Show your chat id (handy when authorizing) |
+| `/whoami` | Show chat id, user id, role, and chat type |
 | a voice note | Transcribed, then run as a task |
 | a file or photo | Downloaded, then handed to the agent as a task |
 | anything else | Run as a task in the browser |
@@ -193,6 +201,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
 - `config.json` — channels (incl. bot tokens), agent, voice, and attachment settings
 - `sessions.json` — per-chat → Aside session id map
 - `history.json` — per-chat recent turns, for follow-up context
+- `settings.json` — per-chat option overrides (model, speed, effort, permission, verbose)
 - `attachments/` — files received from chats (audio is deleted after transcription)
 
 `config.json` agent block (defaults shown):
@@ -201,7 +210,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
 {
   "agent": {
     "command": "aside",
-    "newArgs": [],
+    "newArgs": ["exec"],
     "continueArgs": ["--session", "{session}"],
     "sessionRegex": null,
     "timeoutMs": 1800000,
@@ -228,6 +237,24 @@ Every visible command is published as the bot's Telegram menu at startup:
 - `commands.menu` (default `true`): call `setMyCommands` at startup with every
   visible command. Set `false` to keep the default menu.
 - `commands.hidden` (default `[]`): command names to leave out of the menu.
+
+Roles and permission gating:
+
+```json
+{
+  "roles": { "admins": [] },
+  "permissions": { "allowChatOverride": false }
+}
+```
+
+- `roles.admins`: user ids allowed to run admin commands (like `/permission`).
+  Empty means every authorized sender is admin — the v0.1.0 behaviour.
+- `permissions.allowChatOverride` (default `false`): set `true` to let admins
+  change `/permission` from chat. `/permission full-access` also needs the
+  literal confirm word.
+- `agent.defaults`: per-chat fallbacks for `model`, `speed`, `effort`,
+  `permission`, `verbose`. Effective value = chat setting (`/model` etc.) →
+  `agent.defaults.<field>` → the CLI's own default.
 
 - `command` / `newArgs` / `continueArgs`: how the agent is invoked. The user's
   message is appended as the final argument. `{session}` is substituted with the

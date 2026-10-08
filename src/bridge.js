@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Agent } from './agent.js';
 import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
-import { sessions, history, attachmentsDir } from './config.js';
+import { sessions, history, attachmentsDir, settings } from './config.js';
 import { parseCommand, listCommands } from './chat-commands.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
 import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
@@ -60,7 +60,24 @@ export class Bridge {
     this.queue = [];
     this.running = new Map();
     this.active = 0;
+    this.lastTasks = new Map(); // chatKey -> last composed task (for /retry)
     this.controller = new AbortController();
+  }
+
+  // Roles: an empty/absent admins list means every authorized sender is admin
+  // (I8, preserves v0.1.0 behaviour).
+  isAdmin(userId) {
+    const admins = this.config.roles?.admins || [];
+    return admins.length === 0 || admins.map(String).includes(String(userId));
+  }
+
+  // Effective per-chat option: chat setting -> agent.defaults -> unset.
+  effectiveSetting(channel, chatId, field) {
+    const chat = settings.get(this.chatKey(channel, chatId)) || {};
+    const defs = this.config.agent?.defaults || {};
+    if (chat[field] !== undefined) return chat[field];
+    if (defs[field] !== undefined && defs[field] !== null) return defs[field];
+    return null;
   }
 
   chatKey(channel, chatId) {
@@ -138,15 +155,21 @@ export class Bridge {
   }
 
   // Build the command context and run a registry command. Command failures
-  // become a chat reply, never a bridge crash.
-  async runCommand(channel, { chatId, userId, from, messageId }, cmd, args) {
+  // become a chat reply, never a bridge crash. admin-flagged commands are
+  // gated on the sender's role (empty admins list -> everyone is admin, I8).
+  async runCommand(channel, { chatId, userId, from, messageId, chatType }, cmd, args) {
+    const role = this.isAdmin(userId) ? 'admin' : 'user';
+    if (cmd.admin && role !== 'admin') {
+      return channel.sendText(chatId, 'Admins only.');
+    }
     const ctx = {
       bridge: this,
       channel,
       chatId,
       userId: userId ?? null,
       from,
-      role: 'user', // M3 introduces admin roles
+      role,
+      chatType: chatType ?? 'private',
       reply: (text, opts) => channel.sendText(chatId, text, opts),
     };
     try {
@@ -209,8 +232,8 @@ export class Bridge {
     return { files, transcript: spoken.join('\n\n') };
   }
 
-  async handleMessage(channel, { chatId, text = '', attachments = [], messageId, from, userId }) {
-    if (!channel.isAuthorized(chatId)) {
+  async handleMessage(channel, { chatId, text = '', attachments = [], messageId, from, userId, chatType }) {
+    if (!channel.isAuthorized(chatId, userId)) {
       log.warn(`[${channel.id}] blocked unauthorized chat ${chatId} (${from})`);
       await channel.sendText(chatId, `Not authorized. Your chat id is ${chatId}. Ask the operator to allow it.`);
       return;
@@ -220,7 +243,7 @@ export class Bridge {
     // running as an agent task (I8).
     const parsed = attachments.length ? null : parseCommand(text, { botUsername: channel.botUsername });
     if (parsed?.ignore) return; // aimed at a different bot in a group
-    if (parsed) return this.runCommand(channel, { chatId, userId, from, messageId }, parsed.cmd, parsed.args);
+    if (parsed) return this.runCommand(channel, { chatId, userId, from, messageId, chatType }, parsed.cmd, parsed.args);
 
     // Real task -> run in order for this chat.
     return this.submitTask(channel, { chatId, text, attachments, messageId, from });
@@ -277,11 +300,20 @@ export class Bridge {
         streaming = wantStream && msgId != null;
         lastShown = placeholder;
 
-        const verbose = this.config.agent?.verbose === true;
+        // Effective per-chat options: chat setting -> agent.defaults -> unset.
+        const verbose = this.effectiveSetting(channel, chatId, 'verbose') ?? this.config.agent?.verbose === true;
+        const agentOpts = {
+          model: this.effectiveSetting(channel, chatId, 'model'),
+          speed: this.effectiveSetting(channel, chatId, 'speed'),
+          effort: this.effectiveSetting(channel, chatId, 'effort'),
+          permission: this.effectiveSetting(channel, chatId, 'permission'),
+        };
         // Conversation continuity: prepend recent turns as context (client-side).
         const useContext = this.config.agent?.context !== false;
         const ctxMax = this.config.agent?.contextMaxChars ?? 2000;
         const prompt = useContext ? buildPrompt(history.get(channel.id, chatId), messageText) : messageText;
+        // Remember the composed task so /retry can re-run it.
+        this.lastTasks.set(item.key, { text: messageText, attachments });
 
         // Live-edit state: accumulate raw output, push the latest tail on a timer.
         let acc = '';
@@ -305,14 +337,14 @@ export class Bridge {
           flushTimer = setTimeout(() => { flushTimer = null; pushEdit(); }, throttle);
         } : undefined;
 
-        let res = await this.agent.run({ prompt, sessionId: sid, onData, signal: abortController.signal });
+        let res = await this.agent.run({ prompt, sessionId: sid, onData, signal: abortController.signal, opts: agentOpts });
         // Self-heal: if the stored session id was rejected (expired/unknown/bad),
         // forget it and retry once as a fresh session instead of failing forever.
         if (!res.cancelled && res.sessionMissing && sid) {
           log.warn(`[${channel.id}] session "${sid}" was rejected; starting a fresh one and retrying`);
           sessions.clear(channel.id, chatId);
           acc = '';
-          res = await this.agent.run({ prompt, sessionId: null, onData, signal: abortController.signal });
+          res = await this.agent.run({ prompt, sessionId: null, onData, signal: abortController.signal, opts: agentOpts });
         }
         const secs = ((Date.now() - started) / 1000).toFixed(1);
         log.info(`[${channel.id}] task finished in ${secs}s (exit=${res.code}, ${String(res.text || '').length} chars)`);

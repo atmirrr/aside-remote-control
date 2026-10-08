@@ -10,12 +10,33 @@ export class Agent {
     this.sessionRe = agentCfg.sessionRegex ? new RegExp(agentCfg.sessionRegex, 'i') : null;
   }
 
-  buildArgs(prompt, sessionId) {
+  buildArgs(prompt, sessionId, opts = {}) {
     const sub = (arr) => arr.map((a) => a.replace('{session}', sessionId || ''));
-    const base = sessionId
-      ? sub(this.cfg.continueArgs || [])
-      : sub(this.cfg.newArgs || []);
-    return [...base, prompt];
+    if (sessionId) {
+      // Continued sessions accept no per-task flags (docs/aside-cli-notes.md,
+      // §4.1): resume/list only take --account/--host. Emit just the continue
+      // args; the bridge tells the chat that option changes apply next session.
+      return [...sub(this.cfg.continueArgs || []), prompt];
+    }
+    const flags = [];
+    for (const f of ['model', 'speed', 'effort', 'permission']) {
+      const v = opts[f];
+      if (v) flags.push(`--${f}`, String(v));
+    }
+    return [...sub(this.cfg.newArgs || []), ...flags, prompt];
+  }
+
+  // Argv hardening (I7): the prompt is the last argv element, but a prompt that
+  // starts with "-" could still be parsed as a CLI flag, and a one-word prompt
+  // equal to a root subcommand would run that subcommand instead of a task.
+  // Rewrite minimally so both cases stay unambiguous prompts (tested).
+  static guardPrompt(prompt) {
+    const s = String(prompt ?? '').trim();
+    const SUBCOMMAND_WORDS = ['account', 'login', 'logout', 'host', 'memory', 'skills', 'exec', 'repl', 'mcp', 'guide', 'update', 'session', 'help'];
+    if (s.startsWith('-') || SUBCOMMAND_WORDS.includes(s.toLowerCase())) {
+      return `Do this task: ${s}`;
+    }
+    return s;
   }
 
   // Kill the child and everything it spawned. The agent is spawned detached
@@ -36,7 +57,7 @@ export class Agent {
   // signal aborts, { cancelled: true, code: -4, text, raw }.
   // timeoutMs overrides the configured hard cap for this call (e.g. the short
   // reply-formatting pass shouldn't inherit the 30-minute task timeout).
-  run({ prompt, sessionId = null, onData, timeoutMs, idleTimeoutMs, signal } = {}) {
+  run({ prompt, sessionId = null, onData, timeoutMs, idleTimeoutMs, signal, opts = {} } = {}) {
     const limitMs = timeoutMs ?? this.cfg.timeoutMs ?? 1800000;
     // Idle/stall cap: kill early if the agent emits no output for this long (0
     // disables). The agent normally streams "Thinking"/tool-call lines steadily,
@@ -45,7 +66,7 @@ export class Agent {
     // that Aside gates to its desktop UI with no prompt on stdin. Failing fast
     // beats hanging to limitMs (the 30-min hard cap).
     const idleMs = idleTimeoutMs ?? this.cfg.idleTimeoutMs ?? 0;
-    const inner = this.buildArgs(prompt, sessionId);
+    const inner = this.buildArgs(Agent.guardPrompt(prompt), sessionId, opts);
     // Optional wrapper (e.g. ["script","-q","/dev/null"]) gives the agent a
     // pseudo-TTY so it actually renders output we can capture.
     const wrapper = Array.isArray(this.cfg.wrapper) ? this.cfg.wrapper : [];

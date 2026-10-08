@@ -17,7 +17,7 @@ test('parseCommand table: case, args, @bot, unknown word', () => {
     ['/help@OtherBot', { botUsername: 'MyBot' }, { ignore: true }],
     ['/new@MyBot task text', { botUsername: 'MyBot' }, { name: 'new', args: 'task text' }],
     ['/start', {}, { name: 'help', args: '' }],
-    ['/model', {}, null],
+    ['/frobnicate', {}, null],
     ['hello', {}, null],
     ['', {}, null],
     ['/help   ', {}, { name: 'help', args: '' }],
@@ -47,10 +47,13 @@ test('help text is generated from the registry', () => {
   }
 });
 
-test('dispatch: migrated commands reply byte-identically', async () => {
+test('dispatch: migrated commands keep their first lines (M3 extends /whoami)', async () => {
   const { bridge, channel } = makeBridge();
   await bridge.handleMessage(channel, { chatId: 7, text: '/whoami', from: 'u' });
-  assert.equal(channel.sent.at(-1).text, 'chat id: 7\nusername: u');
+  assert.ok(channel.sent.at(-1).text.startsWith('chat id: 7\nusername: u\n'), 'first two lines unchanged');
+  assert.ok(channel.sent.at(-1).text.includes('user id:'));
+  assert.ok(/role: (admin|user)/.test(channel.sent.at(-1).text));
+  assert.ok(channel.sent.at(-1).text.includes('chat type: private'));
   await bridge.handleMessage(channel, { chatId: 7, text: '/status' });
   assert.equal(channel.sent.at(-1).text, 'No active session yet. Send a task to start one.');
   await bridge.handleMessage(channel, { chatId: 7, text: '/new' });

@@ -17,8 +17,9 @@ export class Channel {
     this.label = cfg.label || cfg.id;
   }
 
-  // True if a given chat is allowed to drive the agent.
-  isAuthorized(chatId) {
+  // True if a given chat is allowed to drive the agent. userId is optional
+  // (back-compat) — group-mode channels use it to check per-user allowlists.
+  isAuthorized(chatId /* , userId */) {
     const allow = this.cfg.allowedChatIds;
     if (!allow || allow.length === 0) return true; // open mode (not recommended)
     return allow.map(String).includes(String(chatId));
