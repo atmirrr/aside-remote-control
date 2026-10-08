@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { listCommands, helpText } from '../src/chat-commands.js';
+import { DEFAULT_CONFIG } from '../src/config.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -109,4 +111,44 @@ test('I3: no listening servers in production code', () => {
     });
   }
   assert.deepEqual(hits, []);
+});
+
+test('I10: command registry is valid and documented', () => {
+  const cmds = listCommands();
+  assert.ok(cmds.length <= 100, `I10: at most 100 commands (found ${cmds.length})`);
+  const names = new Set();
+  const aliases = new Set();
+  for (const c of cmds) {
+    assert.match(c.name, /^[a-z0-9_]{1,32}$/, `I10: bad command name "${c.name}"`);
+    assert.ok(
+      typeof c.description === 'string' && c.description.length >= 3 && c.description.length <= 256,
+      `I10: bad description for "/${c.name}"`,
+    );
+    assert.ok(!names.has(c.name), `I10: duplicate command name "${c.name}"`);
+    names.add(c.name);
+    for (const a of c.aliases || []) {
+      assert.ok(!names.has(a) && !aliases.has(a), `I10: duplicate alias "${a}"`);
+      aliases.add(a);
+    }
+  }
+  const readme = readFileSync(path.join(root, 'README.md'), 'utf8');
+  const commandsSection = readme.split('## In-chat commands')[1]?.split('\n## ')[0] ?? '';
+  const help = helpText();
+  for (const c of cmds) {
+    if (c.hidden) continue;
+    assert.ok(
+      new RegExp('\\|\\s*`?/' + c.name + '\\b').test(commandsSection),
+      `I10: README In-chat commands table missing /${c.name}`,
+    );
+    assert.ok(help.includes(`/${c.name}`), `I10: generated /help missing /${c.name}`);
+  }
+});
+
+test('I10: every top-level config key appears in the README config block', () => {
+  const readme = readFileSync(path.join(root, 'README.md'), 'utf8');
+  const section = readme.split('## Configuration')[1]?.split('\n## ')[0] ?? '';
+  for (const key of Object.keys(DEFAULT_CONFIG)) {
+    if (key === 'version') continue;
+    assert.ok(new RegExp(`\\b${key}\\b`).test(section), `I10: README config block missing key "${key}"`);
+  }
 });

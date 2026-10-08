@@ -103,6 +103,22 @@ export class TelegramChannel extends Channel {
   }
 
   // ---------- runtime ----------
+  // Publish the visible command registry as the bot's Telegram menu.
+  // opts.menu=false or commands.hidden names skip the call entirely; any
+  // failure is a warning, never fatal to the bridge.
+  async registerCommands(list, { menu = true, hidden = [] } = {}) {
+    if (!menu) return;
+    const commands = list
+      .filter((c) => !c.hidden && !hidden.includes(c.name))
+      .map((c) => ({ command: c.name, description: c.description }));
+    try {
+      const r = await this.call('setMyCommands', { commands });
+      if (!r?.ok) throw new Error(r?.description || 'setMyCommands rejected');
+    } catch (e) {
+      log.warn(`[${this.id}] setMyCommands failed (bot menu not updated): ${e.message}`);
+    }
+  }
+
   async start({ onMessage, signal }) {
     // Skip backlog: only handle messages that arrive after start.
     try {

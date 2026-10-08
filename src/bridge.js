@@ -7,6 +7,7 @@ import { Agent } from './agent.js';
 import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
 import { sessions, history, attachmentsDir } from './config.js';
+import { parseCommand, listCommands } from './chat-commands.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
 import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
 
@@ -48,20 +49,6 @@ function composeMessage(text, transcript, files) {
   return [body || NO_MESSAGE, describeFiles(files)].filter(Boolean).join('\n\n');
 }
 
-const HELP = [
-  'Aside Remote Control',
-  '',
-  'Just send a message and I will run it as a task in the Aside browser.',
-  'Send a voice note and I will transcribe it first. Attach photos or files and',
-  'I will hand them to the agent.',
-  '',
-  'Commands:',
-  '  /new      start a fresh agent session (forget context)',
-  '  /status   show the current session id',
-  '  /whoami   show your chat id',
-  '  /help     show this help',
-].join('\n');
-
 export class Bridge {
   constructor(config) {
     this.config = config;
@@ -76,6 +63,26 @@ export class Bridge {
     const next = prev.then(task, task);
     this.queues.set(chatId, next.catch(() => {}));
     return next;
+  }
+
+  // Build the command context and run a registry command. Command failures
+  // become a chat reply, never a bridge crash.
+  async runCommand(channel, { chatId, userId, from, messageId }, cmd, args) {
+    const ctx = {
+      bridge: this,
+      channel,
+      chatId,
+      userId: userId ?? null,
+      from,
+      role: 'user', // M3 introduces admin roles
+      reply: (text, opts) => channel.sendText(chatId, text, opts),
+    };
+    try {
+      return await cmd.run(ctx, args);
+    } catch (e) {
+      log.warn(`[${channel.id}] command /${cmd.name} failed: ${e.message}`);
+      return channel.sendText(chatId, `Command /${cmd.name} failed: ${e.message}`);
+    }
   }
 
   // Fetch a message's files and turn any speech into text. Called only after the
@@ -130,26 +137,18 @@ export class Bridge {
     return { files, transcript: spoken.join('\n\n') };
   }
 
-  async handleMessage(channel, { chatId, text = '', attachments = [], messageId, from }) {
+  async handleMessage(channel, { chatId, text = '', attachments = [], messageId, from, userId }) {
     if (!channel.isAuthorized(chatId)) {
       log.warn(`[${channel.id}] blocked unauthorized chat ${chatId} (${from})`);
       await channel.sendText(chatId, `Not authorized. Your chat id is ${chatId}. Ask the operator to allow it.`);
       return;
     }
 
-    // Commands are typed, never captioned onto a file.
-    const cmd = attachments.length ? '' : text.trim().toLowerCase();
-    if (cmd === '/help' || cmd === '/start') return channel.sendText(chatId, HELP);
-    if (cmd === '/whoami') return channel.sendText(chatId, `chat id: ${chatId}\nusername: ${from}`);
-    if (cmd === '/status') {
-      const sid = sessions.get(channel.id, chatId);
-      return channel.sendText(chatId, sid ? `Active session: ${sid}` : 'No active session yet. Send a task to start one.');
-    }
-    if (cmd === '/new') {
-      sessions.clear(channel.id, chatId);
-      history.clear(channel.id, chatId);
-      return channel.sendText(chatId, 'Started a fresh session. Send your task.');
-    }
+    // Commands are typed, never captioned onto a file. Unknown /word keeps
+    // running as an agent task (I8).
+    const parsed = attachments.length ? null : parseCommand(text, { botUsername: channel.botUsername });
+    if (parsed?.ignore) return; // aimed at a different bot in a group
+    if (parsed) return this.runCommand(channel, { chatId, userId, from, messageId }, parsed.cmd, parsed.args);
 
     // Real task -> run in order for this chat.
     return this.enqueue(chatId, async () => {
@@ -312,6 +311,13 @@ export class Bridge {
     const signal = this.controller.signal;
     const runners = defs.map((def) => {
       const channel = createChannel(def);
+      const commandsCfg = this.config.commands || {};
+      // Fire-and-forget: registerCommands logs its own failures and must never
+      // prevent the poll loop from starting.
+      channel.registerCommands(listCommands(), {
+        menu: commandsCfg.menu !== false,
+        hidden: commandsCfg.hidden || [],
+      });
       return channel.start({
         signal,
         onMessage: (msg) => this.handleMessage(channel, msg),

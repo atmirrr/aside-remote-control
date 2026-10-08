@@ -180,6 +180,10 @@ Notes:
 | a file or photo | Downloaded, then handed to the agent as a task |
 | anything else | Run as a task in the browser |
 
+The bot's Telegram command menu is built from the same registry (see
+`commands.menu` / `commands.hidden` in [Configuration](#configuration)).
+Commands addressed to another bot (`/help@otherbot`) are ignored.
+
 ## Configuration
 
 State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
@@ -208,6 +212,18 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   }
 }
 ```
+
+Every visible command is published as the bot's Telegram menu at startup:
+
+```json
+{
+  "commands": { "menu": true, "hidden": [] }
+}
+```
+
+- `commands.menu` (default `true`): call `setMyCommands` at startup with every
+  visible command. Set `false` to keep the default menu.
+- `commands.hidden` (default `[]`): command names to leave out of the menu.
 
 - `command` / `newArgs` / `continueArgs`: how the agent is invoked. The user's
   message is appended as the final argument. `{session}` is substituted with the

@@ -8,8 +8,15 @@ export const HOME = process.env.ASIDE_REMOTE_HOME || path.join(os.homedir(), '.a
 const CONFIG_PATH = path.join(HOME, 'config.json');
 const SESSIONS_PATH = path.join(HOME, 'sessions.json');
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   version: 1,
+  // Chat-command presentation. The bridge publishes every visible command as
+  // the Telegram bot menu at startup; commands.hidden lists names to leave
+  // out of the menu. Set menu:false to skip the menu call entirely.
+  commands: {
+    menu: true,
+    hidden: [],
+  },
   // How to invoke the Aside browser agent. The bridge shells out to this.
   agent: {
     command: 'aside',        // CLI binary on PATH

@@ -47,4 +47,8 @@ export class Channel {
   // streaming override this and return true on success; the no-op default
   // (returns false) makes the bridge fall back to a single final message.
   async editText(/* chatId, messageId, text */) { return false; }
+
+  // Optional: receive the visible chat-command registry at startup. Telegram
+  // uses it for setMyCommands; failure must be logged, never fatal.
+  async registerCommands(/* list, opts */) {}
 }
