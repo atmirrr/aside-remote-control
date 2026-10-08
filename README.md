@@ -166,6 +166,8 @@ Notes:
 | `aside-remote channels remove <id>` | Remove a channel |
 | `aside-remote channels test [id]` | Send a test message through a channel |
 | `aside-remote start [--channel <id>]` | Start the bridge |
+| `aside-remote doctor [--online]` | Health checks (✓/✗, exit 1 on any ✗) |
+| `aside-remote service print --launchd\|--systemd` | Print a service unit (never installs) |
 | `aside-remote help` / `version` | Help / version |
 
 ## In-chat commands
@@ -184,6 +186,7 @@ Notes:
 | `/retry` | Re-run this chat's last task |
 | `/undo` | Remove the last exchange from history |
 | `/history` | Show recent turns (`/history [n]`, max 20) |
+| `/health` | Bridge health: versions, uptime, queue, last error (admin) |
 | `/schedule` | Schedule a task (admin: `every`/`daily`/`weekdays`/`weekly`/`cron`/`at`/`in`) |
 | `/jobs` | List scheduled jobs (id, spec, next run, last status) |
 | `/unschedule` | Remove a scheduled job (admin, `/unschedule <id>`) |

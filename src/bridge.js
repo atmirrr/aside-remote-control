@@ -9,6 +9,8 @@ import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
 import { sessions, history, attachmentsDir, settings, schedules, HOME, configPath } from './config.js';
 import { Scheduler } from './scheduler.js';
+import { transcriptionKey, registerSecrets } from './util.js';
+import { readFileSync } from 'node:fs';
 import { parseCommand, listCommands } from './chat-commands.js';
 import { makeAsideCli } from './aside-cli.js';
 import { speak } from './tts.js';
@@ -70,6 +72,20 @@ export class Bridge {
     this.aside = makeAsideCli(config.agent.command); // session queries (M4)
     this.channelInstances = new Map(); // channelId -> channel (populated by start)
     const schedCfg = config.schedule || {};
+    this.startedAt = Date.now();
+    this.lastTaskError = null; // { at, msg } for /health (M9)
+    this._asideVersion = null; // { at, value } cached 60 s
+    try {
+      this.version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+    } catch {
+      this.version = '0.0.0';
+    }
+    // Redact configured secrets from every log line (M9).
+    registerSecrets([
+      transcriptionKey(config.voice || {}),
+      transcriptionKey(config.tts || {}),
+      ...(config.channels || []).map((c) => c.token).filter(Boolean),
+    ]);
     this.scheduler = new Scheduler({
       store: schedules,
       bridge: this,
@@ -85,6 +101,14 @@ export class Bridge {
   isAdmin(userId) {
     const admins = this.config.roles?.admins || [];
     return admins.length === 0 || admins.map(String).includes(String(userId));
+  }
+
+  async asideVersion() {
+    const cached = this._asideVersion;
+    if (cached && Date.now() - cached.at < 60000) return cached.value;
+    const v = await this.aside.version();
+    this._asideVersion = { at: Date.now(), value: v ?? 'unknown' };
+    return this._asideVersion.value;
   }
 
   // Effective per-chat option: chat setting -> agent.defaults -> unset.
@@ -473,6 +497,7 @@ export class Bridge {
           }
         }
       } catch (e) {
+        this.lastTaskError = { at: Date.now(), msg: String(e.message) };
         const msg = `Error running task: ${e.message}`;
         if (streaming) { try { await channel.editText(chatId, msgId, msg); } catch { await channel.sendText(chatId, msg); } }
         else await channel.sendText(chatId, msg);
@@ -480,6 +505,9 @@ export class Bridge {
         if (flushTimer) clearTimeout(flushTimer);
         clearInterval(keepTyping);
         item.result = res; // scheduler reads success/failure from here
+        if (res && (res.error === true || res.stalled === true || res.code < 0) && !res.cancelled) {
+          this.lastTaskError = { at: Date.now(), msg: String(res.text || '').split('\n')[0].slice(0, 200) };
+        }
         // M5b: separate completion message (edits don't push-notify).
         const doneAfter = Number(this.config.notify?.doneAfterSec) || 0;
         if (doneAfter > 0 && res && res.cancelled !== true) {

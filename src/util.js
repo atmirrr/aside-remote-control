@@ -23,13 +23,29 @@ function paint(color, s) {
   return useColor ? `${COLORS[color] || ''}${s}${COLORS.reset}` : s;
 }
 
+// Secret redaction inside every log line (M9). Bot tokens match the Telegram
+// shape; API keys are registered by the bridge from config.
+const SECRETS = new Set();
+export function registerSecrets(keys) {
+  for (const k of keys || []) if (k) SECRETS.add(String(k));
+}
+export function redact(text) {
+  let s = String(text);
+  for (const k of SECRETS) s = s.split(k).join('<redacted>');
+  return s.replace(/\d{6,}:[A-Za-z0-9_-]{30,}/g, '<redacted>');
+}
+
+// Non-TTY output (service logs) gets ISO timestamps; TTY keeps colours only.
+const ts = () => (process.stdout.isTTY ? '' : `[${new Date().toISOString()}] `);
+const line = (s) => console.log(ts() + redact(s));
+
 export const log = {
-  info: (s) => console.log(s),
-  ok: (s) => console.log(paint('green', s)),
-  warn: (s) => console.log(paint('yellow', s)),
-  err: (s) => console.error(paint('red', s)),
-  dim: (s) => console.log(paint('dim', s)),
-  step: (s) => console.log(paint('cyan', s)),
+  info: (s) => line(s),
+  ok: (s) => line(paint('green', s)),
+  warn: (s) => line(paint('yellow', s)),
+  err: (s) => console.error(ts() + redact(paint('red', s))),
+  dim: (s) => line(paint('dim', s)),
+  step: (s) => line(paint('cyan', s)),
 };
 export const c = paint;
 

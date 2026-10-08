@@ -4,6 +4,7 @@ import { startCmd } from './commands/start.js';
 import { loadConfig } from './config.js';
 import { listChannelTypes, createChannel } from './channels/index.js';
 import { log } from './util.js';
+import { doctor, serviceUnit } from './ops.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -61,6 +62,28 @@ export async function main(argv = process.argv.slice(2)) {
 
     case 'start':
       return startCmd([sub, ...rest].filter((x) => x !== undefined));
+
+    case 'service':
+      if (sub === 'print') {
+        const kind = rest[0];
+        const unit = kind ? serviceUnit(kind.replace(/^--/, '')) : null;
+        if (!unit) {
+          log.err('Usage: aside-remote service print --launchd|--systemd');
+          process.exitCode = 1;
+          return;
+        }
+        console.log(unit);
+        return;
+      }
+      log.err(`Unknown service subcommand "${sub || ''}".`);
+      process.exitCode = 1;
+      return;
+
+    case 'doctor': {
+      const code = await doctor([sub, ...rest].filter((x) => x !== undefined));
+      process.exitCode = code;
+      return;
+    }
 
     default:
       log.err(`Unknown command "${cmd}".`);

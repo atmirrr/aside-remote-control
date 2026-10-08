@@ -454,3 +454,26 @@ defineCommand({
     return ctx.reply('Usage: /voice on|off|reset');
   },
 });
+
+// ---- ops (M9) ----
+defineCommand({
+  name: 'health',
+  admin: true,
+  description: 'bridge health: versions, uptime, queue, last error (admin)',
+  run: async (ctx) => {
+    const b = ctx.bridge;
+    const err = b.lastTaskError
+      ? `${new Date(b.lastTaskError.at).toISOString()} ${b.lastTaskError.msg}`
+      : 'none';
+    const lines = [
+      `Aside Remote Control v${b.version}`,
+      `uptime: ${Math.max(0, Math.round((Date.now() - b.startedAt) / 1000))}s`,
+      `node: ${process.versions.node}`,
+      `aside: ${await b.asideVersion()}`,
+      `running: ${b.active} / queued: ${b.queue.length}`,
+      `scheduled jobs: ${b.scheduler.list().length}`,
+      `last task error: ${err}`,
+    ];
+    return ctx.reply(lines.join('\n'));
+  },
+});
