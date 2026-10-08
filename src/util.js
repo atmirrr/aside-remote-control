@@ -279,6 +279,40 @@ export function checkOutboundPath(filePath, cfg = {}) {
 }
 
 // 4m12s-style duration for the completion ping.
+// Strip markdown syntax for TTS input (the text is still sent in full).
+export function stripMarkdown(text) {
+  return String(text ?? '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')            // images
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')         // links -> label
+    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')               // code
+    .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1')           // bold/italic
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')                // headings
+    .replace(/^\s*[-*+]\s+/gm, '')                     // list bullets
+    .trim();
+}
+
+// Cap spoken text at a sentence boundary when possible.
+export function capSpoken(text, maxChars = 1500) {
+  const t = String(text ?? '');
+  if (t.length <= maxChars) return t;
+  const cut = t.slice(0, maxChars);
+  const m = /[.!?][^.!?]*$/.exec(cut);
+  return m ? cut.slice(0, m.index + 1).trim() : cut;
+}
+
+// The transcription key may live in config or (preferred) the environment.
+export function transcriptionKey(cfg = {}) {
+  return cfg.apiKey || process.env[cfg.apiKeyEnv || 'OPENAI_API_KEY'] || null;
+}
+
+// A self-hosted endpoint on loopback needs no key; remote ones still do.
+export function isLocalEndpoint(cfg = {}) {
+  try {
+    const u = new URL(cfg.baseUrl || 'https://api.openai.com/v1');
+    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(u.hostname);
+  } catch { return false; }
+}
+
 export function formatDuration(totalSec) {
   const s = Math.max(0, Math.round(totalSec));
   const h = Math.floor(s / 3600);

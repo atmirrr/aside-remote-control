@@ -179,6 +179,7 @@ Notes:
 | `/fast` | Toggle fast model speed (`on`/`off`/`reset`) |
 | `/effort` | Set thinking effort (`off`…`ultrabrowse`, `reset`) |
 | `/verbose` | Show the raw transcript (`on`/`off`/`reset`) |
+| `/voice` | Speak answers as voice notes (`on`/`off`/`reset`) |
 | `/permission` | Override agent permission (admin; opt-in via config) |
 | `/retry` | Re-run this chat's last task |
 | `/undo` | Remove the last exchange from history |
@@ -285,6 +286,26 @@ Outbound files and notifications:
   are logged, never echoed to chat.
 - `notify.doneAfterSec` (default `0` = off): send a short `✅ Done in …`
   message after tasks that ran at least this long (edits don't push-notify).
+
+Voice out (TTS) and local STT:
+
+```json
+{
+  "tts": { "enabled": false, "baseUrl": "https://api.openai.com/v1",
+           "model": "tts-1", "voice": "alloy", "maxChars": 1500 },
+  "voice": { "engine": "http", "whisperCpp": { "bin": "whisper-cli", "model": null, "ffmpeg": "ffmpeg", "extraArgs": [] } }
+}
+```
+
+- `tts` (default `enabled: false`): spoken answers via any OpenAI-compatible
+  `/audio/speech` endpoint. A per-chat `/voice on` additionally gates which
+  chats hear them; the text is always sent in full; markdown is stripped and
+  speech is capped at `maxChars` on a sentence boundary. Failures are
+  warnings only.
+- `voice.engine: "whisper-cpp"` (default `"http"`): transcribe incoming voice
+  locally — `ffmpeg` to 16 kHz mono WAV, then
+  `whisper-cli -m <model> -f <wav> -nt -np` (+ `extraArgs`). Nothing leaves
+  the machine.
 
 Scheduler:
 
@@ -472,8 +493,8 @@ against the `Channel` interface, so no other file needs changes.
 - Image display — return screenshots and generated/referenced images inline in chat.
 - ~~Outbound files — send the agent's generated documents back as attachments~~
   Shipped: `outbound.dirs`-gated document sending (see Configuration).
-- Local speech-to-text — spawn a `whisper.cpp` binary instead of calling an HTTP
-  endpoint, for a fully offline voice path.
+- ~~Local speech-to-text — spawn a `whisper.cpp` binary instead of calling an HTTP
+  endpoint, for a fully offline voice path.~~ Shipped: `voice.engine: "whisper-cpp"`.
 - ~~Per-message model / speed / effort controls (`/model`, `/fast`, `/effort`) —~~
   Shipped: per-chat settings (see In-chat commands and `agent.defaults`).
 

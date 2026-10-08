@@ -57,6 +57,9 @@ export class Channel {
   // the outbound gate before calling; return true when the file was sent.
   async sendFile(/* chatId, filePath, caption */) { return false; }
 
+  // Optional: send a spoken audio buffer (OGG/Opus) back to the chat (M8).
+  async sendVoice(/* chatId, buffer */) { return false; }
+
   // Optional: remove an inline keyboard from a previously sent message (M5d).
   async removeKeyboard(/* chatId, messageId */) { return false; }
 }

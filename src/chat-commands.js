@@ -437,3 +437,20 @@ defineCommand({
     return ctx.reply(ok ? `Unscheduled ${id}.` : `No such job: ${id} (see /jobs).`);
   },
 });
+
+// ---- voice out (M8) ----
+defineCommand({
+  name: 'voice',
+  description: 'speak answers as voice notes (/voice on|off|reset)',
+  run: (ctx, args) => {
+    const a = String(args).trim().toLowerCase();
+    if (!a) {
+      const on = ctx.bridge.effectiveSetting(ctx.channel, ctx.chatId, 'voice') === true;
+      return ctx.reply(`Voice replies: ${on ? 'on' : 'off'}. Allowed: on, off, reset.`);
+    }
+    if (a === 'reset') { setSetting(ctx, 'voice', null); return ctx.reply('Voice replies reset.'); }
+    if (a === 'on') { setSetting(ctx, 'voice', true); return ctx.reply('Voice replies on — answers will also be spoken (when tts.enabled).'); }
+    if (a === 'off') { setSetting(ctx, 'voice', false); return ctx.reply('Voice replies off.'); }
+    return ctx.reply('Usage: /voice on|off|reset');
+  },
+});

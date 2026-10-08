@@ -380,6 +380,14 @@ export class TelegramChannel extends Channel {
     }
   }
 
+  async sendVoice(chatId, buffer) {
+    await multipartPost(API(this.token, 'sendVoice'), {
+      fields: { chat_id: String(chatId) },
+      files: [{ field: 'voice', filename: 'voice.ogg', contentType: 'audio/ogg', buffer }],
+    });
+    return true;
+  }
+
   async sendFile(chatId, filePath, caption = '') {
     if (!fs.existsSync(filePath)) return false;
     await multipartPost(API(this.token, 'sendDocument'), {

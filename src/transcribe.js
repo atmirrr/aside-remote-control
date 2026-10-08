@@ -4,8 +4,13 @@
 // Groq, or a whisper server on localhost — so point `voice.baseUrl` at whichever
 // you use. It's a single multipart POST, so the zero-dependency rule holds.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { multipartPost, sanitizeFilename } from './util.js';
+import { execFile } from 'node:child_process';
+import { multipartPost, sanitizeFilename, transcriptionKey, isLocalEndpoint } from './util.js';
+
+// Back-compat re-exports (the key helpers moved to util.js in M8).
+export { transcriptionKey, isLocalEndpoint };
 
 // Whisper-style endpoints pick a decoder from the filename extension, so the
 // extension Telegram gave us is authoritative and the sender's declared mime
@@ -33,29 +38,42 @@ export const VOICE_SETUP_HINT = [
   '    endpoint needs no API key, and your audio never leaves the machine.',
 ].join('\n');
 
-// The key may live in the config file (like the bot token) or in the
-// environment (preferred: it never touches disk).
-export function transcriptionKey(cfg = {}) {
-  return cfg.apiKey || process.env[cfg.apiKeyEnv || 'OPENAI_API_KEY'] || null;
-}
-
-// A self-hosted whisper on loopback needs no key, so a local baseUrl is itself
-// sufficient configuration. Anything remote still requires one.
-export function isLocalEndpoint(cfg = {}) {
-  try {
-    const u = new URL(cfg.baseUrl || 'https://api.openai.com/v1');
-    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(u.hostname);
-  } catch { return false; }
-}
-
 export function isTranscriptionConfigured(cfg = {}) {
   if (cfg.enabled === false) return false;
+  if (cfg.engine === 'whisper-cpp') {
+    const w = cfg.whisperCpp || {};
+    return !!(w.model && (w.bin || true));
+  }
   return !!transcriptionKey(cfg) || isLocalEndpoint(cfg);
+}
+
+// Local whisper.cpp path: ffmpeg to 16k mono WAV, then whisper-cli.
+async function transcribeWhisperCpp(filePath, cfg = {}) {
+  const w = cfg.whisperCpp || {};
+  const bin = w.bin || 'whisper-cli';
+  const ffmpeg = w.ffmpeg || 'ffmpeg';
+  const model = w.model;
+  if (!model) throw new Error('whisper-cpp model is not configured (voice.whisperCpp.model)');
+  const wav = path.join(os.tmpdir(), `aside-remote-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+  const run = (cmd, args) => new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: cfg.timeoutMs ?? 120000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`${path.basename(cmd)} failed: ${(err.message || '').split('\n')[0]}`));
+      else resolve({ stdout: String(stdout), stderr: String(stderr) });
+    });
+  });
+  try {
+    await run(ffmpeg, ['-i', filePath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav]);
+    const r = await run(bin, ['-m', model, '-f', wav, '-nt', '-np', ...(w.extraArgs || [])]);
+    return r.stdout.trim();
+  } finally {
+    await fs.promises.rm(wav, { force: true }).catch(() => {});
+  }
 }
 
 // Transcribe an audio/video file to text. Returns '' when the endpoint heard
 // nothing (silence, or a note the user recorded by accident).
 export async function transcribe(filePath, cfg = {}, mimeType) {
+  if (cfg.engine === 'whisper-cpp') return transcribeWhisperCpp(filePath, cfg);
   const key = transcriptionKey(cfg);
   if (!key && !isLocalEndpoint(cfg)) throw new Error('no speech-to-text API key configured');
 

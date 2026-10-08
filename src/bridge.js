@@ -11,8 +11,9 @@ import { sessions, history, attachmentsDir, settings, schedules, HOME, configPat
 import { Scheduler } from './scheduler.js';
 import { parseCommand, listCommands } from './chat-commands.js';
 import { makeAsideCli } from './aside-cli.js';
+import { speak } from './tts.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
-import { log, findImagePaths, findFilePaths, checkOutboundPath, formatDuration, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
+import { log, findImagePaths, findFilePaths, checkOutboundPath, formatDuration, stripMarkdown, capSpoken, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
 
 // Flatten recent turns into the single prompt string the CLI accepts, so
 // follow-ups keep context. The Aside CLI has no structured messages array (the
@@ -57,6 +58,7 @@ export class Bridge {
     this.config = config;
     this.agent = new Agent(config.agent);
     this.transcribe = transcribe; // swappable for tests
+    this.speak = speak; // swappable for tests (M8)
     // Control plane: a global FIFO of submitted tasks plus the running set,
     // keyed channelId:chatId. maxConcurrent caps parallel agent processes;
     // maxQueuePerChat caps one chat's backlog.
@@ -438,6 +440,18 @@ export class Bridge {
           // (Legacy path, no allowlist — outbound files below are gated.)
           for (const img of findImagePaths(res.text)) {
             try { await channel.sendImage(chatId, img.replace(/^~(?=\/)/, process.env.HOME || '~')); } catch {}
+          }
+          // M8: spoken answers. Per-chat /voice gate + tts.enabled; the text
+          // was already sent in full above. Failures are warnings only.
+          const ttsCfg = this.config.tts || {};
+          const speakOn = this.effectiveSetting(channel, chatId, 'voice') === true;
+          if (speakOn && ttsCfg.enabled === true && typeof channel.sendVoice === 'function') {
+            try {
+              const spoken = await this.speak(capSpoken(stripMarkdown(finalText), ttsCfg.maxChars ?? 1500), ttsCfg);
+              if (spoken && spoken.length) await channel.sendVoice(chatId, spoken).catch(() => {});
+            } catch (e) {
+              log.warn(`[${channel.id}] tts failed: ${e.message}`);
+            }
           }
           // M5a: agent-referenced documents, strictly gated by outbound.dirs.
           const outCfg = this.config.outbound || {};

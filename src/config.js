@@ -87,6 +87,9 @@ export const DEFAULT_CONFIG = {
   // hint instead of a transcript; everything else keeps working.
   voice: {
     enabled: true,
+    // 'http' (default, OpenAI-compatible endpoint) or 'whisper-cpp' (local:
+    // ffmpeg -> whisper-cli, no audio leaves the machine).
+    engine: 'http',
     baseUrl: 'https://api.openai.com/v1',
     model: 'whisper-1',
     apiKey: null,               // takes precedence over apiKeyEnv
@@ -96,6 +99,27 @@ export const DEFAULT_CONFIG = {
     // Echo what was heard back into the chat before running the task, so a
     // mistranscription is obvious rather than silently acted on.
     echoTranscript: true,
+    // whisper.cpp engine (M8): ffmpeg converts to 16 kHz mono WAV, then
+    // whisper-cli -m <model> -f <wav> -nt -np (+ extraArgs) transcribes.
+    whisperCpp: {
+      bin: 'whisper-cli',
+      model: null,
+      ffmpeg: 'ffmpeg',
+      extraArgs: [],
+    },
+  },
+  // Text-to-speech for outgoing replies (M8). Off by default; a per-chat
+  // /voice on switch additionally gates which chats get spoken answers. The
+  // written text is always sent in full; TTS failures are warnings only.
+  tts: {
+    enabled: false,
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'tts-1',
+    voice: 'alloy',
+    apiKey: null,               // takes precedence over apiKeyEnv
+    apiKeyEnv: 'OPENAI_API_KEY',
+    maxChars: 1500,
+    timeoutMs: 120000,
   },
   // Incoming files (photos, documents, video). They're downloaded next to the
   // bridge's other state and their paths are handed to the agent, which opens
@@ -176,6 +200,7 @@ export function loadConfig() {
     ...cfg,
     agent: { ...DEFAULT_CONFIG.agent, ...(cfg.agent || {}) },
     voice: { ...DEFAULT_CONFIG.voice, ...(cfg.voice || {}) },
+    tts: { ...DEFAULT_CONFIG.tts, ...(cfg.tts || {}) },
     attachments: { ...DEFAULT_CONFIG.attachments, ...(cfg.attachments || {}) },
     roles: { ...DEFAULT_CONFIG.roles, ...(cfg.roles || {}) },
     permissions: { ...DEFAULT_CONFIG.permissions, ...(cfg.permissions || {}) },
