@@ -52,4 +52,11 @@ export class Channel {
   // Optional: receive the visible chat-command registry at startup. Telegram
   // uses it for setMyCommands; failure must be logged, never fatal.
   async registerCommands(/* list, opts */) {}
+
+  // Optional: send a local file back to the chat (M5a). The bridge applies
+  // the outbound gate before calling; return true when the file was sent.
+  async sendFile(/* chatId, filePath, caption */) { return false; }
+
+  // Optional: remove an inline keyboard from a previously sent message (M5d).
+  async removeKeyboard(/* chatId, messageId */) { return false; }
 }

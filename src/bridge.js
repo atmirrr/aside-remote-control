@@ -3,14 +3,15 @@
 // agent session stays consistent and tasks don't overlap.
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { Agent } from './agent.js';
 import { createChannel } from './channels/index.js';
 import { Channel } from './channels/base.js';
-import { sessions, history, attachmentsDir, settings } from './config.js';
+import { sessions, history, attachmentsDir, settings, HOME, configPath } from './config.js';
 import { parseCommand, listCommands } from './chat-commands.js';
 import { makeAsideCli } from './aside-cli.js';
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
-import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
+import { log, findImagePaths, findFilePaths, checkOutboundPath, formatDuration, cleanTerminalOutput, chunkText, sleep, extractAnswer, formatBytes } from './util.js';
 
 // Flatten recent turns into the single prompt string the CLI accepts, so
 // follow-ups keep context. The Aside CLI has no structured messages array (the
@@ -62,6 +63,7 @@ export class Bridge {
     this.running = new Map();
     this.active = 0;
     this.lastTasks = new Map(); // chatKey -> last composed task (for /retry)
+    this.rerunTokens = new Map(); // token -> { key, messageId, expiresAt } (M5d)
     this.aside = makeAsideCli(config.agent.command); // session queries (M4)
     this.controller = new AbortController();
   }
@@ -90,7 +92,7 @@ export class Bridge {
   // otherwise queues it (replying ⏳ Queued (#n)) or refuses when the per-chat
   // backlog is full. The returned promise resolves when the task has finished
   // (or was dropped).
-  submitTask(channel, msg) {
+  submitTask(channel, msg, extra = {}) {
     const key = this.chatKey(channel, msg.chatId);
     const cap = this.config.agent?.maxQueuePerChat ?? 5;
     const pending = this.queue.filter((i) => i.key === key).length;
@@ -101,6 +103,7 @@ export class Bridge {
       const item = {
         key, channel, msg, resolve, queuedAt: Date.now(),
         abortController: new AbortController(), startedAt: null, promise: null,
+        ...extra,
       };
       this.queue.push(item);
       if (this.running.has(key) || this.active >= (this.config.agent?.maxConcurrent ?? 1)) {
@@ -257,6 +260,7 @@ export class Bridge {
     const { channel, msg, abortController } = item;
     const { chatId, text = '', attachments = [], messageId, from } = msg;
     const started = item.startedAt;
+    let res = null;
       await channel.sendTyping(chatId);
       // Downloading and transcribing happen before the agent starts, and can take
       // a few seconds, so keep the indicator alive from here rather than later.
@@ -308,7 +312,7 @@ export class Bridge {
           model: this.effectiveSetting(channel, chatId, 'model'),
           speed: this.effectiveSetting(channel, chatId, 'speed'),
           effort: this.effectiveSetting(channel, chatId, 'effort'),
-          permission: this.effectiveSetting(channel, chatId, 'permission'),
+          permission: item.forcePermission ?? this.effectiveSetting(channel, chatId, 'permission'),
         };
         // Conversation continuity: while a session is bound the CLI resumes it
         // server-side (no client-side replay); otherwise prepend recent turns.
@@ -340,7 +344,7 @@ export class Bridge {
           flushTimer = setTimeout(() => { flushTimer = null; pushEdit(); }, throttle);
         } : undefined;
 
-        let res = await this.agent.run({ prompt, sessionId: sid, onData, signal: abortController.signal, opts: agentOpts });
+        res = await this.agent.run({ prompt, sessionId: sid, onData, signal: abortController.signal, opts: agentOpts });
         // Self-heal: if the stored session id was rejected (expired/unknown/bad),
         // forget it and retry once as a fresh session instead of failing forever.
         if (!res.cancelled && res.sessionMissing && sid) {
@@ -388,6 +392,12 @@ export class Bridge {
         }
         if (!res.cancelled) {
           const opts = verbose ? {} : { markdown: true };
+          if (res.stalled && this.config.permissions?.escalation === true && agentOpts.permission !== 'full-access') {
+            const token = randomBytes(12).toString('hex');
+            this.rerunTokens.set(token, { key: item.key, messageId: msgId, expiresAt: Date.now() + 10 * 60 * 1000 });
+            finalText += '\n\n🔓 The button re-runs the same task with full access — a fresh attempt; the stalled run is not resumed.';
+            opts.buttons = [[{ text: '🔓 Re-run with full access', data: `/rerun ${token}` }]];
+          }
           const parts = chunkText(finalText, 3900);
           if (streaming) {
             // Land the final result into the streamed message; overflow as follow-ups.
@@ -411,8 +421,27 @@ export class Bridge {
             if (cleanAnswer) history.append(channel.id, chatId, 'assistant', cleanAnswer, ctxMax);
           }
           // Best-effort: attach any image artifacts the agent referenced.
+          // (Legacy path, no allowlist — outbound files below are gated.)
           for (const img of findImagePaths(res.text)) {
             try { await channel.sendImage(chatId, img.replace(/^~(?=\/)/, process.env.HOME || '~')); } catch {}
+          }
+          // M5a: agent-referenced documents, strictly gated by outbound.dirs.
+          const outCfg = this.config.outbound || {};
+          if (Array.isArray(outCfg.dirs) && outCfg.dirs.length) {
+            let sentFiles = 0;
+            for (const ref of findFilePaths(res.text)) {
+              if (sentFiles >= (outCfg.maxFiles ?? 5)) {
+                log.warn(`[${channel.id}] outbound: skipped, maxFiles reached`);
+                break;
+              }
+              const chk = checkOutboundPath(ref, {
+                dirs: outCfg.dirs, maxBytes: outCfg.maxBytes, denylist: outCfg.denylist,
+                home: HOME, configPath: configPath(),
+              });
+              if (!chk.ok) { log.warn(`[${channel.id}] outbound: rejected ${ref}: ${chk.reason}`); continue; }
+              const sentOk = await channel.sendFile(chatId, chk.path).catch(() => false);
+              if (sentOk) sentFiles += 1;
+            }
           }
         }
       } catch (e) {
@@ -422,6 +451,14 @@ export class Bridge {
       } finally {
         if (flushTimer) clearTimeout(flushTimer);
         clearInterval(keepTyping);
+        // M5b: separate completion message (edits don't push-notify).
+        const doneAfter = Number(this.config.notify?.doneAfterSec) || 0;
+        if (doneAfter > 0 && res && res.cancelled !== true) {
+          const elapsedSec = (Date.now() - started) / 1000;
+          if (elapsedSec >= doneAfter) {
+            channel.sendText(chatId, `✅ Done in ${formatDuration(elapsedSec)}`).catch(() => {});
+          }
+        }
       }
   }
 

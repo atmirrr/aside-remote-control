@@ -2,7 +2,9 @@
 import readline from 'node:readline';
 import https from 'node:https';
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { URL } from 'node:url';
 
@@ -226,6 +228,65 @@ export function findImagePaths(text) {
   let m;
   while ((m = IMG_RE.exec(text)) !== null) found.add(m[1]);
   return [...found];
+}
+
+
+// Best-effort: find local document paths referenced in agent output (M5).
+const FILE_RE = /(?:^|\s|["'(])((?:\/|\.\/|~\/)[^\s"')]+\.(?:docx?|xlsx?|pptx?|pdf|txt|md|csv|json|zip|tar(?:\.gz)?|mp3|mp4|mov|wav|ogg|opus|html?))/gi;
+export function findFilePaths(text) {
+  const found = new Set();
+  let m;
+  while ((m = FILE_RE.exec(String(text ?? ''))) !== null) found.add(m[1]);
+  return [...found];
+}
+
+// Wildcard match for denylist patterns (only '*' is special).
+function wildcardMatch(pattern, name) {
+  const re = new RegExp('^' + String(pattern).split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+  return re.test(name);
+}
+
+const expandTilde = (p) => String(p).replace(/^~(?=$|\/)/, os.homedir());
+
+// Outbound file gate (M5a). A path may be sent to chat only when it passes
+// every check; each rejection carries a reason for the log, never for chat.
+export function checkOutboundPath(filePath, cfg = {}) {
+  const dirs = (cfg.dirs || []).map((d) => {
+    try { return fs.realpathSync(expandTilde(String(d))); } catch { return expandTilde(String(d)); }
+  });
+  const maxBytes = cfg.maxBytes ?? 45 * 1024 * 1024;
+  const denylist = cfg.denylist || [];
+  const p = expandTilde(String(filePath));
+  let real;
+  let st;
+  try {
+    real = fs.realpathSync(p);
+    st = fs.statSync(real);
+  } catch {
+    return { ok: false, reason: 'not a readable file' };
+  }
+  if (!st.isFile()) return { ok: false, reason: 'not a regular file' };
+  if (st.size > maxBytes) return { ok: false, reason: 'over maxBytes' };
+  if (dirs.length === 0) return { ok: false, reason: 'outbound.dirs is empty' };
+  if (!dirs.some((d) => real === d || real.startsWith(d + path.sep))) return { ok: false, reason: 'outside allowed dirs' };
+  const base = path.basename(real);
+  if (denylist.some((pat) => wildcardMatch(pat, base))) return { ok: false, reason: 'denylisted name' };
+  if (base === 'config.json' && cfg.home) {
+    const homeReal = (() => { try { return fs.realpathSync(expandTilde(cfg.home)); } catch { return expandTilde(cfg.home); } })();
+    if (real.startsWith(homeReal + path.sep)) return { ok: false, reason: 'bridge config.json is never sent' };
+  }
+  return { ok: true, path: real };
+}
+
+// 4m12s-style duration for the completion ping.
+export function formatDuration(totalSec) {
+  const s = Math.max(0, Math.round(totalSec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h${m}m${sec}s`;
+  if (m) return `${m}m${sec}s`;
+  return `${sec}s`;
 }
 
 export function sleep(ms) {

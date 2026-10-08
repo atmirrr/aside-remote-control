@@ -120,6 +120,23 @@ export const DEFAULT_CONFIG = {
   // before /permission (and friends) can change how tasks run.
   permissions: {
     allowChatOverride: false,
+    // When true, a stalled task's reply carries a one-tap button that re-runs
+    // the same task once with --permission full-access (never changes the
+    // stored setting). Off by default.
+    escalation: false,
+  },
+  // Outbound files: agent-referenced documents sent back to chat. Strictly
+  // off until dirs is non-empty; see docs/outbound-buttons.md for the gate.
+  outbound: {
+    dirs: [],
+    maxBytes: 45 * 1024 * 1024,
+    maxFiles: 5,
+    denylist: ['.env*', 'id_rsa*', '*.pem', '*.key'],
+  },
+  // Completion ping: a separate short message after long tasks (Telegram does
+  // not push-notify on edits). 0 = off.
+  notify: {
+    doneAfterSec: 0,
   },
   channels: [],
 };
@@ -155,6 +172,8 @@ export function loadConfig() {
     attachments: { ...DEFAULT_CONFIG.attachments, ...(cfg.attachments || {}) },
     roles: { ...DEFAULT_CONFIG.roles, ...(cfg.roles || {}) },
     permissions: { ...DEFAULT_CONFIG.permissions, ...(cfg.permissions || {}) },
+    outbound: { ...DEFAULT_CONFIG.outbound, ...(cfg.outbound || {}) },
+    notify: { ...DEFAULT_CONFIG.notify, ...(cfg.notify || {}) },
     channels: cfg.channels || [],
   };
 }

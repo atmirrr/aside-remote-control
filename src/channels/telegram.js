@@ -129,10 +129,11 @@ export class TelegramChannel extends Channel {
     } catch { /* ignore */ }
 
     log.ok(`[${this.id}] listening as @${this.cfg.botUsername || '?'}`);
+    const ALLOWED = ['message', 'edited_message', 'callback_query'];
     let backoff = 1000;
     while (!signal.aborted) {
       try {
-        const r = await this.call('getUpdates', { offset: this.offset, timeout: 30 });
+        const r = await this.call('getUpdates', { offset: this.offset, timeout: 30, allowed_updates: ALLOWED });
         backoff = 1000;
         if (!r?.ok) {
           // Telegram hands each update to exactly one getUpdates caller, so a
@@ -153,6 +154,25 @@ export class TelegramChannel extends Channel {
         this.lastPollError = null;
         for (const u of r.result) {
           this.offset = u.update_id + 1;
+          const cq = u.callback_query;
+          if (cq) {
+            // Button taps: answer first, then flow through the normal message
+            // path (data becomes the text) so the registry and I4 apply.
+            this.call('answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+            if (cq.message?.chat?.id) {
+              await onMessage({
+                chatId: cq.message.chat.id,
+                text: String(cq.data || ''),
+                attachments: [],
+                messageId: cq.message.message_id,
+                from: cq.from?.username || cq.from?.first_name || String(cq.from?.id || ''),
+                userId: String(cq.from?.id ?? ''),
+                chatType: cq.message.chat.type === 'private' ? 'private' : 'group',
+                viaButton: true,
+              });
+            }
+            continue;
+          }
           const msg = u.message || u.edited_message;
           if (!msg) continue;
           // A file-bearing message carries its text in `caption`, not `text`.
@@ -270,8 +290,18 @@ export class TelegramChannel extends Channel {
 
   // One sendMessage. With { markdown: true } the text is rendered to Telegram
   // HTML; if Telegram rejects the markup it is retried as plain text.
-  async sendOne(chatId, text, { markdown } = {}) {
+  async sendOne(chatId, text, { markdown, buttons } = {}) {
     const base = { chat_id: chatId, text, disable_web_page_preview: true };
+    if (Array.isArray(buttons) && buttons.length) {
+      for (const row of buttons) {
+        for (const b of row) {
+          if (!b || typeof b.data !== 'string' || Buffer.byteLength(b.data, 'utf8') > 64) {
+            throw new Error('callback_data must be a string of at most 64 bytes');
+          }
+        }
+      }
+      base.reply_markup = { inline_keyboard: buttons };
+    }
     if (markdown) {
       const r = await this.call('sendMessage', { ...base, text: mdToTelegramHtml(text), parse_mode: 'HTML' });
       if (r?.ok) return r.result?.message_id;
@@ -292,6 +322,24 @@ export class TelegramChannel extends Channel {
       }
       const r = await this.call('editMessageText', plain);
       return r?.ok === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async sendFile(chatId, filePath, caption = '') {
+    if (!fs.existsSync(filePath)) return false;
+    await multipartPost(API(this.token, 'sendDocument'), {
+      fields: { chat_id: String(chatId), ...(caption ? { caption: caption.slice(0, 1000) } : {}) },
+      files: [{ field: 'document', filename: path.basename(filePath), buffer: fs.readFileSync(filePath) }],
+    });
+    return true;
+  }
+
+  async removeKeyboard(chatId, messageId) {
+    try {
+      await this.call('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: {} });
+      return true;
     } catch {
       return false;
     }

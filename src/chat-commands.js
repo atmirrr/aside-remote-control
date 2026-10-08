@@ -363,3 +363,27 @@ defineCommand({
     return ctx.reply(ok ? `Steered ${sid}.` : 'Steer failed — the CLI rejected the request.');
   },
 });
+
+// ---- approve-by-rerun (M5d): hidden, admin, button-driven ----
+defineCommand({
+  name: 'rerun',
+  hidden: true,
+  admin: true,
+  description: 're-run the stalled task with full access (button-driven)',
+  run: (ctx, args) => {
+    const token = String(args).trim();
+    const rec = ctx.bridge.rerunTokens.get(token);
+    if (!rec || rec.expiresAt < Date.now()) return ctx.reply('This re-run token is invalid or expired.');
+    if (rec.key !== `${ctx.channel.id}:${ctx.chatId}`) return ctx.reply('This re-run token belongs to another chat.');
+    ctx.bridge.rerunTokens.delete(token); // single-use
+    const last = ctx.bridge.lastTasks.get(rec.key);
+    if (!last) return ctx.reply('Nothing to re-run.');
+    if (rec.messageId != null) ctx.channel.removeKeyboard(ctx.chatId, rec.messageId).catch(() => {});
+    ctx.bridge.submitTask(
+      ctx.channel,
+      { chatId: ctx.chatId, text: last.text, attachments: last.attachments, from: ctx.from },
+      { forcePermission: 'full-access' },
+    );
+    return ctx.reply('↻ Re-running with full access…');
+  },
+});

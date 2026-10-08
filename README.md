@@ -255,6 +255,29 @@ Roles and permission gating:
 - `permissions.allowChatOverride` (default `false`): set `true` to let admins
   change `/permission` from chat. `/permission full-access` also needs the
   literal confirm word.
+
+Outbound files and notifications:
+
+```json
+{
+  "outbound": { "dirs": [], "maxBytes": 47185920, "maxFiles": 5,
+                "denylist": [".env*", "id_rsa*", "*.pem", "*.key"] },
+  "notify": { "doneAfterSec": 0 },
+  "permissions": { "escalation": false }
+}
+```
+
+- `outbound.dirs` (default `[]`): the gate for sending agent-referenced files
+  back to chat — **off until non-empty**. A file is sent only when its realpath
+  is inside a configured dir, it's a regular file under `outbound.maxBytes`
+  (45 MB), its name isn't denylisted (nor `config.json` inside the bridge
+  home), and the answer referenced at most `outbound.maxFiles` (5). Rejections
+  are logged, never echoed to chat.
+- `notify.doneAfterSec` (default `0` = off): send a short `✅ Done in …`
+  message after tasks that ran at least this long (edits don't push-notify).
+- `permissions.escalation` (default `false`): when `true`, a **stalled** task's
+  reply carries a one-tap button that re-runs the same task once with
+  `--permission full-access` (the stored setting never changes).
 - `agent.defaults`: per-chat fallbacks for `model`, `speed`, `effort`,
   `permission`, `verbose`. Effective value = chat setting (`/model` etc.) →
   `agent.defaults.<field>` → the CLI's own default.
@@ -423,8 +446,8 @@ against the `Channel` interface, so no other file needs changes.
 **Richer input & output**
 
 - Image display — return screenshots and generated/referenced images inline in chat.
-- Outbound files — send the agent's generated documents back as attachments
-  (only `sendPhoto` is wired up today).
+- ~~Outbound files — send the agent's generated documents back as attachments~~
+  Shipped: `outbound.dirs`-gated document sending (see Configuration).
 - Local speech-to-text — spawn a `whisper.cpp` binary instead of calling an HTTP
   endpoint, for a fully offline voice path.
 - ~~Per-message model / speed / effort controls (`/model`, `/fast`, `/effort`) —~~

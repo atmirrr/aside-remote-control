@@ -20,7 +20,12 @@ export function makeChannel(overrides = {}) {
   ch.typing = [];
   ch.images = [];
   ch.edits = [];
-  ch.sendText = async (chatId, text, opts) => { ch.sent.push({ chatId, text, opts }); };
+  ch.files = [];
+  ch.keyboardRemovals = [];
+  let mid = 0;
+  ch.sendText = async (chatId, text, opts) => { ch.sent.push({ chatId, text, opts }); mid += 1; return mid; };
+  ch.sendFile = async (chatId, filePath, caption) => { ch.files.push({ chatId, filePath, caption }); return true; };
+  ch.removeKeyboard = async (chatId, messageId) => { ch.keyboardRemovals.push({ chatId, messageId }); return true; };
   ch.sendTyping = async (chatId) => { ch.typing.push(chatId); };
   ch.sendImage = async (chatId, file, caption) => { ch.images.push({ chatId, file, caption }); };
   ch.editText = async (chatId, messageId, text) => { ch.edits.push({ chatId, messageId, text }); return true; };
