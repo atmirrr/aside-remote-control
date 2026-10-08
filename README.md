@@ -334,6 +334,20 @@ writing to your disk.
 That's it — the CLI, config, bridge, sessions, and access control all work
 against the `Channel` interface, so no other file needs changes.
 
+## Development
+
+- **Tests:** `npm test` runs `test/run.mjs` — every `test/*.test.mjs` file in
+  its own `node --test` child with a fresh temp `ASIDE_REMOTE_HOME`. Works on
+  Node 18, 20, 22, 24 (no directory arguments, no `--test-concurrency`).
+- **Invariants:** `test/invariants.test.mjs` enforces the non-negotiables —
+  zero dependencies, Node ≥ 18 source floor, outbound-only networking. A line
+  can opt out of the API scan with `// invariants-ignore: <reason>`.
+- **Fixtures:** `test/fixtures/fake-aside.mjs` is a stand-in `aside` CLI and
+  `test/helpers.mjs` provides `makeBridge`/`makeChannel`/`waitFor` for new
+  tests. See [docs/testing.md](docs/testing.md).
+- **CI:** `.github/workflows/test.yml` runs the suite on Node 18/20/22/24.
+- **Map for contributors:** [AGENTS.md](AGENTS.md).
+
 ## Roadmap
 
 **Reliability & control**

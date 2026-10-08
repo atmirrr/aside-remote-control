@@ -12,7 +12,7 @@
   "scripts": {
     "start": "node bin/aside-remote.js start",
     "help": "node bin/aside-remote.js help",
-    "test": "ASIDE_REMOTE_HOME=\"${TMPDIR:-/tmp}/aside-remote-test-$$\" node --test --test-concurrency=1 test/"
+    "test": "node test/run.mjs"
   },
   "engines": {
     "node": ">=18"
