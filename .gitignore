@@ -8,3 +8,7 @@ node_modules/
 config.json
 sessions.json
 history.json
+
+# Editor/scratch backups
+*.bak
+*.bak-*
