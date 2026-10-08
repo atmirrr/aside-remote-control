@@ -5,6 +5,7 @@
 // you use. It's a single multipart POST, so the zero-dependency rule holds.
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { multipartPost, sanitizeFilename } from './util.js';
 
 // Whisper-style endpoints pick a decoder from the filename extension, so the
@@ -53,6 +54,16 @@ export function isTranscriptionConfigured(cfg = {}) {
   return !!transcriptionKey(cfg) || isLocalEndpoint(cfg);
 }
 
+// Words Whisper should spell a certain way, shared with the phone apps and Home Assistant.
+// Read on every call so edits to ~/.aside-remote/vocabulary.txt apply without a restart.
+const VOCABULARY = path.join(os.homedir(), '.aside-remote', 'vocabulary.txt');
+export function vocabularyHint(baseUrl) {
+  if (!/openrouter\.ai/.test(baseUrl)) return null;
+  let words = [];
+  try { words = fs.readFileSync(VOCABULARY, 'utf8').split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#')); } catch {}
+  return words.length ? JSON.stringify({ options: { groq: { prompt: `${words.join(', ')}.` } } }) : null;
+}
+
 // Transcribe an audio/video file to text. Returns '' when the endpoint heard
 // nothing (silence, or a note the user recorded by accident).
 export async function transcribe(filePath, cfg = {}, mimeType) {
@@ -71,6 +82,8 @@ export async function transcribe(filePath, cfg = {}, mimeType) {
       // Both optional: null fields are dropped by multipartPost.
       language: cfg.language || null,
       prompt: cfg.prompt || null,
+      // OpenRouter ignores `prompt`; the shared word list reaches Groq via provider passthrough.
+      provider: vocabularyHint(base),
     },
     files: [{
       field: 'file',
