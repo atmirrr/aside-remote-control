@@ -54,7 +54,7 @@ export function isTranscriptionConfigured(cfg = {}) {
   return !!transcriptionKey(cfg) || isLocalEndpoint(cfg);
 }
 
-// Words Whisper should spell a certain way, shared with the phone apps and Home Assistant.
+// Words Whisper should spell a certain way, one per line; other local tools can share the file.
 // Read on every call so edits to ~/.aside-remote/vocabulary.txt apply without a restart.
 const VOCABULARY = path.join(os.homedir(), '.aside-remote', 'vocabulary.txt');
 export function vocabularyHint(baseUrl) {

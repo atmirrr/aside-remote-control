@@ -9,7 +9,7 @@ const CONFIG_PATH = path.join(HOME, 'config.json');
 const SESSIONS_PATH = path.join(HOME, 'sessions.json');
 // Which channel started each agent session (session id -> channel id). Append-only: the
 // sessions map above only keeps the current session per chat, this keeps every one, so a
-// chat list elsewhere (aside-phone) can say "telegram" or "voice" instead of Aside's "cli".
+// chat list in another tool can say "telegram" or "voice" instead of Aside's "cli".
 const ORIGINS_PATH = path.join(HOME, 'origins.json');
 
 // Pseudo-TTY driver. The Aside CLI only renders output to a TTY, so when its
