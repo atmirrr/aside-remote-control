@@ -1,6 +1,7 @@
 // Telegram channel: long-polling getUpdates, no webhook / public URL needed.
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { Channel } from './base.js';
 import { httpsJson, httpsGetBuffer, multipartPost, sanitizeFilename, log, sleep, mdToTelegramHtml } from '../util.js';
 
@@ -18,6 +19,25 @@ const MEDIA_GROUP_WINDOW_MS = 1500;
 // addressed as "<chat id>_t<topic id>": it gets its own session, and replies go
 // back into that topic instead of landing in the group's General.
 const TOPIC_SEP = '_t';
+
+// The task card (a Bot API 10.4 widget) sent in place of the "Thinking..."
+// bubble. telegram-card.html is the readable source (Hallmark stamp, line
+// breaks); Telegram limits a widget to 4096 bytes after zlib, so comments and
+// line breaks go before sending. Read once, on first use.
+const CARD_FILE = new URL('./telegram-card.html', import.meta.url);
+const CARD_LIMIT = 4096;
+let cardHtmlCache = null;
+function cardHtml() {
+  if (cardHtmlCache) return cardHtmlCache;
+  const src = fs.readFileSync(CARD_FILE, 'utf8');
+  cardHtmlCache = src
+    .replace(/<style>([\s\S]*?)<\/style>/, (_, css) => `<style>${css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n+/g, '')}</style>`)
+    .replace(/>\s*\n\s*</g, '><')
+    .trim();
+  const packed = zlib.deflateSync(Buffer.from(cardHtmlCache), { level: 9 }).length;
+  if (packed > CARD_LIMIT) log.warn(`task card is ${packed} bytes compressed, over Telegram's ${CARD_LIMIT}; Telegram will refuse it`);
+  return cardHtmlCache;
+}
 
 // Render the channel-agnostic [{ text, data }] button list as one row of
 // Telegram inline keyboard buttons; taps arrive as callback_query updates.
@@ -150,7 +170,7 @@ export class TelegramChannel extends Channel {
   }
 
   // ---------- runtime ----------
-  async start({ onMessage, onAction, signal }) {
+  async start({ onMessage, onAction, onCardQuery, signal }) {
     // Skip backlog: only handle messages that arrive after start.
     try {
       const drain = await this.call('getUpdates', { timeout: 0 });
@@ -198,6 +218,13 @@ export class TelegramChannel extends Channel {
                 fromId: cb.from?.id,
               });
             }
+            continue;
+          }
+          // A tap on a task card, or the card asking for fresh state while it
+          // is on screen. Telegram wants every query answered within 15 s, so
+          // this is not awaited and never waits on a task.
+          if (u.widget_query) {
+            this.answerCardQuery(u.widget_query, onCardQuery).catch(() => {});
             continue;
           }
           const msg = u.message || u.edited_message;
@@ -302,6 +329,76 @@ export class TelegramChannel extends Channel {
     const dest = path.join(destDir, prefix ? `${sanitizeFilename(prefix, 'msg')}-${name}` : name);
     fs.writeFileSync(dest, buf, { mode: 0o600 });
     return dest;
+  }
+
+  // ---------- task cards (widgets) ----------
+
+  // Cards go only to private chats: in production Telegram shows widgets
+  // nowhere else yet. Off unless the channel config says cards: true.
+  cardsFor(chatId) {
+    return this.cfg.cards === true && /^\d+$/.test(String(chatId));
+  }
+
+  // Sends the card with its first state. Returns the message id, or undefined
+  // when Telegram refuses it, so the bridge falls back to the text bubble.
+  async sendCard(chatId, state, caption = '') {
+    try {
+      const r = await this.call('sendWidget', {
+        chat_id: chatId,
+        html: cardHtml(),
+        chat_data: state,
+        allow_queries: true,
+        disable_notification: true, // the answer, sent as its own message, is what notifies
+        ...(caption ? { caption } : {}),
+      });
+      if (r?.ok) return r.result?.message_id;
+      log.warn(`[${this.id}] sendWidget refused: ${r?.description || 'no reply'}; using the text bubble`);
+    } catch (e) {
+      log.warn(`[${this.id}] sendWidget failed: ${e.message}; using the text bubble`);
+    }
+    return undefined;
+  }
+
+  // New state for a card. Silent: no "edited" mark, no notification. An edit
+  // that changes nothing counts as done, as Telegram's docs say to treat it.
+  async updateCard(chatId, messageId, state) {
+    try {
+      const r = await this.call('editMessageWidgetData', { chat_id: chatId, message_id: messageId, chat_data: state });
+      return r?.ok === true || /not modified/i.test(r?.description || '');
+    } catch { return false; }
+  }
+
+  async setCardCaption(chatId, messageId, caption) {
+    try {
+      const r = await this.call('editMessageCaption', { chat_id: chatId, message_id: messageId, caption });
+      return r?.ok === true || /not modified/i.test(r?.description || '');
+    } catch { return false; }
+  }
+
+  // Ask the bridge, answer Telegram. The answer's data is the card's fresh
+  // state (at most 1024 bytes) or nothing; a slow or failing bridge still gets
+  // an empty answer in time, so the card never waits out Telegram's 15 s.
+  async answerCardQuery(q, onCardQuery) {
+    let data = null;
+    try {
+      if (onCardQuery && q.chat && q.message_id != null) {
+        data = await Promise.race([
+          onCardQuery({
+            chatId: this.chatKey({ chat: q.chat }),
+            messageId: q.message_id,
+            data: String(q.data || ''),
+            from: q.from?.username || q.from?.first_name || String(q.from?.id || ''),
+            fromId: q.from?.id,
+          }),
+          sleep(10000).then(() => null),
+        ]);
+      }
+    } catch (e) {
+      log.warn(`[${this.id}] card query "${q.data}" failed: ${e.message}`);
+    }
+    const body = { widget_query_id: q.id };
+    if (typeof data === 'string' && data && Buffer.byteLength(data) <= 1024) body.data = data;
+    await this.call('answerWidgetQuery', body);
   }
 
   async sendTyping(chatId) {

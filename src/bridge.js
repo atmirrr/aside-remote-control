@@ -10,6 +10,7 @@ import { sessions, history, attachmentsDir, saveConfig, HOME } from './config.js
 import { transcribe, isTranscriptionConfigured, VOICE_SETUP_HINT } from './transcribe.js';
 import { synthesizeVoice } from './voice.js';
 import { log, findImagePaths, cleanTerminalOutput, chunkText, sleep, extractAnswer, splitSummary, formatBytes, readFinalReply } from './util.js';
+import { CardStore, TaskCard, cardJson, cardCaption, stepReader } from './cards.js';
 
 // Flatten recent turns into the single prompt string the CLI accepts, so a
 // message that has to start a *fresh* session still carries recent context
@@ -81,6 +82,11 @@ const HELP = [
   'saying it is taking longer than usual, with a "Stop" button - tap it if you',
   'want out, or ignore it and let the task finish.',
   '',
+  'In a private chat with an up-to-date Telegram app, a task shows as a live',
+  'card instead: its steps and how long each took, the time so far, Stop (with',
+  'five seconds to undo) and Send now for a message waiting behind it. The',
+  'answer arrives below the card as its own message.',
+  '',
   'Or prefix it: "/btw <task>" skips the queue and runs straight away, next to',
   'whatever is already going.',
   '',
@@ -116,6 +122,9 @@ export class Bridge {
     // in the queue. Each one is announced with a "send now" button, which
     // steers it into the running task instead of waiting. seq -> entry.
     this.pending = new Map();
+    // Live task cards (Telegram widgets), saved so they can be answered and
+    // corrected after a restart. See cards.js.
+    this.cards = new CardStore(path.join(HOME, 'cards.json'));
     this.controller = new AbortController();
   }
 
@@ -402,6 +411,82 @@ export class Bridge {
     }
   }
 
+  // ---------- task cards ----------
+
+  // The running task in a chat that owns a card (a /btw beside it has its own).
+  cardTask(chatId) {
+    return this.activeTasks(chatId).find((t) => t.card && !t.card.done && !t.isolated) || null;
+  }
+
+  // Keep the running card's "queued N" true whenever the queue changes.
+  refreshQueue(chatId) {
+    this.cardTask(chatId)?.card.queued(this.pendingFor(chatId).length);
+  }
+
+  // A fresh card for a task that is starting. Null when Telegram refuses it:
+  // the text bubble takes over.
+  async openCard(channel, chatId, started) {
+    const state = { st: 'w', t0: started, n: 0, q: this.pendingFor(chatId).length, s: [] };
+    const messageId = await channel.sendCard(chatId, cardJson(state), cardCaption(state)).catch(() => undefined);
+    if (messageId == null) return null;
+    this.cards.set(channel.id, chatId, messageId, state);
+    return new TaskCard({ channel, chatId, messageId, state, store: this.cards, minGapMs: this.config.agent?.cardMinGapMs ?? 1500 });
+  }
+
+  // A card asking for its state ("s", sent while it is on screen) or tapped:
+  // "stop" acts after the card's own undo window unless "undo" follows, "now"
+  // sends the next queued message into the running task. Answers with the
+  // card's state, which the card draws at once.
+  async handleCardQuery(channel, { chatId, messageId, data, from, fromId }) {
+    if (!channel.isAuthorized(chatId)) return null;
+    if (channel.isAllowedSender && !channel.isAllowedSender(chatId, fromId)) return null;
+    const task = this.activeTasks(chatId).find((t) => t.card?.messageId === messageId);
+    if (!task) {
+      // A card whose task already ended, or one a restart cut off.
+      const saved = this.cards.get(channel.id, chatId, messageId);
+      if (!saved) return null;
+      if (saved.st === 'w') {
+        saved.st = 'x';
+        saved.te = Date.now();
+        this.cards.set(channel.id, chatId, messageId, saved);
+      }
+      return cardJson(saved);
+    }
+    const { card } = task;
+    const grace = this.config.agent?.cardStopGraceMs ?? 5000;
+    if (data === 'stop' && !card.stopTimer) {
+      card.stopTimer = setTimeout(() => {
+        card.stopTimer = null;
+        log.info(`[${channel.id}] (${from}) card stop ended task ${task.seq} after ${Math.round((Date.now() - task.startedAt) / 1000)}s`);
+        task.controller.abort();
+      }, grace);
+      log.info(`[${channel.id}] (${from}) card stop on task ${task.seq}: acting in ${grace / 1000}s unless undone`);
+    } else if (data === 'undo') {
+      if (card.stopTimer) log.info(`[${channel.id}] (${from}) card stop on task ${task.seq} undone`);
+      clearTimeout(card.stopTimer);
+      card.stopTimer = null;
+    } else if (data === 'now') {
+      const next = this.pendingFor(chatId).sort((a, b) => a.seq - b.seq)[0];
+      if (next) next.sendNow().then((o) => log.info(`[${channel.id}] (${from}) card send-now for task ${next.seq}: ${o}`)).catch(() => {});
+    }
+    return card.json();
+  }
+
+  // Cards a previous run left saying "working" lost their task with it: say so,
+  // so a restart never leaves a card that looks alive.
+  async retireCards(channel) {
+    if (typeof channel.updateCard !== 'function') return;
+    for (const { chatId, messageId, state } of this.cards.unfinished(channel.id)) {
+      state.st = 'x';
+      state.te = state.te || Date.now();
+      this.cards.set(channel.id, chatId, messageId, state);
+      const id = /^-?\d+$/.test(chatId) ? Number(chatId) : chatId;
+      await channel.updateCard(id, messageId, cardJson(state)).catch(() => false);
+      await channel.setCardCaption?.(id, messageId, cardCaption(state)).catch(() => false);
+      log.info(`[${channel.id}] card ${messageId} marked stopped: its task ended with the last run`);
+    }
+  }
+
   // Remove a queue notice. Deleting is the point: the notice exists only to
   // carry its button, so once the button is moot nothing should remain. If the
   // channel cannot delete, strip the button by editing the text back in place.
@@ -670,9 +755,18 @@ export class Bridge {
         // Voice channels opt out: speaking "Thinking..." aloud is noise, and with
         // no message id there is nothing to stream into, so the final answer
         // arrives as one clean sendText.
-        msgId = channel.wantsPlaceholder === false
-          ? undefined
-          : await channel.sendText(chatId, placeholder).catch(() => undefined);
+        // A Telegram DM gets a live task card instead of the bubble: steps,
+        // time, Stop and the queue, with the answer as its own message at the
+        // end. Anything that cannot show one (a group, a voice channel, a
+        // refusal) keeps the bubble.
+        if (channel.wantsPlaceholder !== false && typeof channel.sendCard === 'function' && channel.cardsFor?.(chatId) === true) {
+          entry.card = await this.openCard(channel, chatId, started);
+        }
+        if (!entry.card) {
+          msgId = channel.wantsPlaceholder === false
+            ? undefined
+            : await channel.sendText(chatId, placeholder).catch(() => undefined);
+        }
         streaming = wantStream && msgId != null;
         lastShown = placeholder;
 
@@ -740,13 +834,15 @@ export class Bridge {
           seen += chunk.length;
           if (flushTimer) return;
           flushTimer = setTimeout(() => { flushTimer = null; pushEdit(); }, throttle);
-        } : undefined;
+        } : entry.card ? stepReader((title) => entry.card.step(title)) : undefined;
         // Steering mid-task: the reply so far stays in the bubble it was
         // streaming into (above the user's correction), and everything from
         // here on goes into a new bubble below it, so the steered answer reads
         // in order. Without streaming the reply is sent at the end anyway, so
         // it already lands below and there is nothing to rotate.
         entry.rotate = async () => {
+          // With a card there is no bubble to split: the card just notes it.
+          if (entry.card) { entry.card.step('Your follow-up'); return; }
           if (!streaming) return;
           if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
           while (editing) await sleep(20);
@@ -779,6 +875,8 @@ export class Bridge {
           // wedged one look identical, so the notice states the one thing that
           // is actually known (it is slow, it is alive) and hands the decision
           // over instead of speculating about why.
+          // The card already shows how long it has been quiet, with its own Stop.
+          if (entry.card) return;
           const text = `⏳ This is taking longer than usual (${mins(elapsedMs)} so far). Still running.`;
           log.warn(`[${channel.id}] task ${seq} ${kind === 'idle' ? `silent for ${mins(idleMs)}` : `past its ${mins(limitMs)} cap`}; offering the stop button`);
           const id = await channel.sendText(chatId, text, {
@@ -893,7 +991,17 @@ export class Bridge {
         // Voice mode: deliver the reply as a spoken voice note — the recap
         // when there is one, else the whole answer. Tried before any text
         // lands, so a failure falls through with nothing lost.
-        if (await this.speakReply(channel, chatId, finalText)) {
+        if (entry.card) {
+          // The card ends where it is and the answer arrives below it as its
+          // own message, which is also what notifies. A stop needs no words:
+          // the card says it.
+          const st = res.aborted ? 'x' : (res.stalled || res.code < 0) ? 'f' : 'd';
+          await entry.card.finish(st);
+          if (!res.aborted && !(st === 'd' && await this.speakReply(channel, chatId, finalText))) {
+            for (const part of parts) await channel.sendText(chatId, part, opts);
+          }
+          log.info(`[${channel.id}] card ${entry.card.messageId}: ${st === 'd' ? 'done' : st === 'x' ? 'stopped' : 'failed'}`);
+        } else if (await this.speakReply(channel, chatId, finalText)) {
           if (streaming) {
             while (editing) await sleep(20);
             // Deleting the streamed message is the "replace": the voice note
@@ -939,9 +1047,12 @@ export class Bridge {
         }
       } catch (e) {
         const msg = `Error running task: ${e.message}`;
-        if (streaming) { try { await channel.editText(chatId, msgId, msg); } catch { await channel.sendText(chatId, msg); } }
+        if (entry.card) { await entry.card.finish('f').catch(() => {}); await channel.sendText(chatId, msg).catch(() => {}); }
+        else if (streaming) { try { await channel.editText(chatId, msgId, msg); } catch { await channel.sendText(chatId, msg); } }
         else await channel.sendText(chatId, msg);
       } finally {
+        // A card is never left saying "working" once its task is over.
+        if (entry.card && !entry.card.done) await entry.card.finish('f').catch(() => {});
         this.removeRunning(chatId, entry);
         // The task is over (finished, stopped, or errored) - retire every kill
         // button it raised, so a later tap can't read as "still killable".
@@ -1013,6 +1124,7 @@ export class Bridge {
         if (!claim()) return 'already started on its own';
         fate = 'steered';
         this.pending.delete(seq);
+        this.refreshQueue(chatId);
         await this.dropNotice(channel, chatId, noticeId);
         // Files and voice notes are resolved here, the same way a task would.
         let files = [];
@@ -1034,6 +1146,7 @@ export class Bridge {
           claimed = false;
           fate = 'queued';
           this.pending.set(seq, entryRef);
+          this.refreshQueue(chatId);
           log.warn(`[${channel.id}] send-now steer of task ${seq} into [${target.sessionId}] failed: ${(r.err || r.out || '').slice(0, 300)}`);
           return 'steer failed, left queued';
         }
@@ -1051,6 +1164,7 @@ export class Bridge {
         if (!claim()) return;
         fate = 'dropped';
         this.pending.delete(seq);
+        this.refreshQueue(chatId);
         log.info(`[${channel.id}] queued task ${seq} cancelled: ${why}`);
         await this.dropNotice(channel, chatId, noticeId);
       },
@@ -1064,13 +1178,18 @@ export class Bridge {
     // the turn came while the notice was going out, it goes again at once.
     if (!claimed && this.pending.has(seq)) {
       routed({ kind: 'queued', ahead: this.queuedAhead(chatId, seq) });
-      noticeId = await channel.sendText(chatId, QUEUE_NOTICE, {
-        buttons: [{ text: 'send now', data: `steer:${seq}` }],
-        // What this message is (see the stall notice): a channel that cannot
-        // show the button may say "queued" its own way, or not at all.
-        notice: 'queued',
-      }).catch(() => undefined);
-      if (claimed) await this.dropNotice(channel, chatId, noticeId);
+      if (this.cardTask(chatId)) {
+        // The running task's card shows the queue and carries "Send now".
+        this.refreshQueue(chatId);
+      } else {
+        noticeId = await channel.sendText(chatId, QUEUE_NOTICE, {
+          buttons: [{ text: 'send now', data: `steer:${seq}` }],
+          // What this message is (see the stall notice): a channel that cannot
+          // show the button may say "queued" its own way, or not at all.
+          notice: 'queued',
+        }).catch(() => undefined);
+        if (claimed) await this.dropNotice(channel, chatId, noticeId);
+      }
     } else {
       routed({ kind: fate === 'queued' ? 'started' : fate });
     }
@@ -1107,10 +1226,14 @@ export class Bridge {
       log.err('No channels could be started.');
       return false;
     }
+    // Cards a previous run left saying "working" get corrected first.
+    for (const ch of built) this.retireCards(ch).catch(() => {});
     const runners = built.map((channel) => channel.start({
       signal,
       onMessage: (msg) => this.handleMessage(channel, msg),
       onAction: (act) => this.handleAction(channel, act),
+      // Task cards asking for state, or tapped (see handleCardQuery).
+      onCardQuery: (q) => this.handleCardQuery(channel, q),
       // The slash-command operations as plain calls (see controlFor).
       control: this.controlFor(channel),
     }));

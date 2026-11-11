@@ -119,6 +119,21 @@ While a task is running:
   **Stop** button. Stop ends that one task; `/stop` ends everything in the chat.
   Both also tell Aside to stop the session, so the browser doesn't carry on.
 
+## Task cards (Telegram widgets)
+
+![A task card in a Telegram chat: live steps with their times, a queued follow-up sent in, Stop with undo, and the answer as its own message](docs/task-card.gif)
+
+In a private chat, with `"cards": true` on the Telegram channel, each task shows as a live card (a Bot API 10.4 widget) instead of the "Thinking..." bubble:
+
+- the steps the agent has taken (its own step names) with how long each took, the newest at the bottom, older ones behind `+N`
+- the time so far, ticking on the phone, and `quiet 2m` once no new step has come for a minute
+- Stop, which acts after five seconds unless you tap Undo, and Send now for a message waiting behind the task
+- the answer, which arrives below the card as its own message (that is also the one notification; the card itself is silent)
+
+The card's HTML lives in `src/channels/telegram-card.html` (a Hallmark "Wayfind" design, light and dark with the chat theme) and must stay under Telegram's 4096 bytes after zlib; the bridge strips its comments before sending and warns in the log if it grows past the limit. The bridge writes the card's state with `editMessageWidgetData` and answers the card's requests (`s` for fresh state while it is on screen, `stop`, `undo`, `now`) through `widget_query` updates. Cards are remembered in `cards.json`, so a card whose task died with a restart is marked stopped on the next start instead of looking alive.
+
+Groups and forum topics keep the text bubble: Telegram shows widgets only in private chats for now. Apps without widget support show the card's caption (`Working`, then `Done 4:05`, `Stopped 1:10` or `Failed 0:40`).
+
 ## Groups and forum topics
 
 - **Allow the group:** add the bot, then send `/whoami@YourBot` there. It
@@ -229,6 +244,7 @@ State lives in `~/.aside-remote/` (override with `ASIDE_REMOTE_HOME`):
   (append-only). Aside labels them all `cli`; this lets other tools show where
   each one came from.
 - `history.json`: per-chat recent turns, for fallback context (see `context` below)
+- `cards.json`: the state of recent task cards (see [Task cards](#task-cards-telegram-widgets)), kept so a card can still be answered, and corrected, after a restart
 - `attachments/`: files received from chats (audio is deleted after transcription)
 
 `config.json` agent block (defaults shown):

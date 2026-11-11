@@ -1,0 +1,100 @@
+<style>
+/* Hallmark · component: task status card (Telegram widget) · genre: modern-minimal · theme: Wayfind (deal 1/3, seed live-status-card-agent-caa9·a64d2af4·2026-11-11·r0) · redesign: restyle · wayfind: platform by day, night in a dark chat · states: 8 · contrast: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R4 V4 · weakest: R, the ink board is the heaviest part; it holds three rows and the rest waits behind the +N row */
+/* Hallmark · waive 64 · mono on the labels, chips and figures · Wayfind is the departure board, set in its fixed-cell mono throughout */
+/* Hallmark · answered F16 · Telegram draws the selection, caret and scrollbars of a widget itself; the card cannot theme them */
+:root{color-scheme:light dark;--space-3xs:2px;--space-2xs:4px;--space-xs:8px;--space-sm:12px;--text-sm:.875em;--text-md:1em;--color-paper:#edf0f4;--color-paper-2:#dde2e7;--color-ink:#0a0d13;--color-muted:#565b64;--color-line:#0a0d13;--color-plate:#0a0d13;--color-plate-ink:#edf0f4;--color-accent:#2055e1;--color-accent-ink:#fcfeff;--color-accent-2:#f4b522;--color-accent-2-ink:#0a0d13;--color-focus:#2055e1;--font-body:ui-monospace,monospace;--rule-bar:2px;--rule-hair:1px}
+@media (prefers-color-scheme:dark){:root{--color-paper:#080b10;--color-paper-2:#15181e;--color-ink:#eff2f5;--color-muted:#9fa5ad;--color-line:#7b8189;--color-plate:#15181e;--color-plate-ink:#eff2f5;--color-accent:#457cfd;--color-accent-ink:#080b10;--color-focus:#457cfd}}
+html,body{overflow-x:clip}
+body{margin:0;padding:var(--space-sm);background:var(--color-paper);color:var(--color-ink);font:400 var(--text-md)/1.45 var(--font-body);font-variant-numeric:tabular-nums}
+svg{flex:none;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.r,.u,.f{display:flex;align-items:center;gap:var(--space-xs);min-height:36px}
+.t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m{color:var(--color-muted)}
+.sp{flex:1}
+.o.b,.lv.b{animation:bl .36s steps(1)}
+@keyframes bl{50%{opacity:0}}
+.fig{flex:none;padding:0 var(--space-2xs);background:var(--color-plate);color:var(--color-accent-2);font-weight:800}
+.late{flex:none;padding:0 var(--space-2xs);background:var(--color-accent-2);color:var(--color-accent-2-ink);font-weight:500}
+.ask{margin:0 0 var(--space-xs);padding:var(--space-xs) var(--space-sm);background:var(--color-accent);color:var(--color-accent-ink);font-size:var(--text-sm)}
+.ask p{margin:var(--space-2xs) 0 0;font-size:var(--text-md);font-weight:800;overflow-wrap:break-word}
+.ch{display:flex}
+.ch button{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ch button+button{margin-left:calc(-1*var(--space-3xs))}
+button{position:relative;min-height:36px;padding:0 var(--space-sm);border:var(--rule-bar) solid var(--color-line);border-radius:0;background:none;color:var(--color-ink);font:500 var(--text-sm)/1 var(--font-body);white-space:nowrap;cursor:pointer}
+button::before{content:"";position:absolute;inset:-4px}
+button:focus-visible{outline:2px solid var(--color-focus);outline-offset:2px}
+@media (hover:hover){button:not(.pri):hover{background:var(--color-paper-2)}}
+button:active,button.on{background:var(--color-ink);color:var(--color-paper)}
+button:disabled{opacity:.55;cursor:not-allowed}
+button[aria-busy=true]{cursor:progress}
+button[aria-busy=true]::after{content:"";position:absolute;left:0;bottom:0;width:30%;height:var(--space-3xs);background:currentColor;animation:ld .8s linear infinite}
+@keyframes ld{to{transform:translateX(233%)}}
+.pri{background:var(--color-accent);border-color:var(--color-accent);color:var(--color-accent-ink);font-weight:800}
+.err{background:var(--color-accent-2);border-color:var(--color-accent-2);color:var(--color-accent-2-ink)}
+.k{display:flex;align-items:center;justify-content:center;width:36px;padding:0}
+.k svg{width:12px;height:12px}
+@media (prefers-reduced-motion:reduce){.o.b,.lv.b,button[aria-busy=true]::after{animation:none}}
+:root{--color-plate-muted:#9fa5ad;--color-plate-rule:#34383f}
+@media (prefers-color-scheme:dark){:root{--color-plate-rule:#2c3038}}
+.o{flex:none;width:10px;height:10px;border-radius:50%;background:var(--color-accent)}
+.board{padding:0 var(--space-sm);background:var(--color-plate);color:var(--color-plate-ink)}
+.l{display:flex;align-items:center;gap:var(--space-xs);min-height:34px;color:var(--color-plate-muted);border-top:var(--rule-hair) solid var(--color-plate-rule)}
+.l:first-child{border-top:0}
+.l.z{color:var(--color-plate-ink)}
+.n{flex:none;font-weight:800;color:var(--color-accent-2)}
+.more{min-height:26px;font-size:var(--text-sm)}
+.board+.ask{margin-top:var(--space-sm)}
+.f{margin-top:var(--space-xs)}
+.tot{font-weight:800}
+</style>
+<div id="v"><div class="r"><span class="t">Working</span></div></div>
+<script>
+const W=window.TelegramWidget||{},$=i=>document.getElementById(i),v=$('v');
+const E=s=>String(s).replace(/[&<>"]/g,c=>'&#'+c.charCodeAt(0)+';');
+const F=ms=>{const s=Math.max(0,ms/1e3|0);return s<3600?(s/60|0)+':'+String(s%60).padStart(2,'0'):(s/3600|0)+'h'+String(s%3600/60|0).padStart(2,'0')};
+const M=ms=>ms<6e4?(ms/1e3|0)+'s':(ms/6e4|0)+'m';
+const I={x:'<rect x="5" y="5" width="14" height="14" fill="currentColor"/>',d:'<path d="M5 12.5l4.5 4.5L19 7.5"/>',n:'<path d="M9 7h10M9 12h10M9 17h10M5 7h0M5 12h0M5 17h0"/>'};
+const ic=k=>'<svg viewBox="0 0 24 24" aria-hidden="true">'+I[k]+'</svg>';
+const B=(id,t,c)=>'<button type="button" id="'+id+'"'+(c?' class="'+c+'"':'')+'>'+t+'</button>';
+let S={},open=0,stop=0,sd=0,pg=0,ls='';
+function rd(){try{S=JSON.parse(W.chatData)||{}}catch(e){S={}}}
+function cur(){const s=S.s||[];return s.length?s[s.length-1]:['',S.t0||Date.now()]}
+function dur(i){const a=S.s[i],b=S.s[i+1];return(b?b[1]:S.te||Date.now())-a[1]}
+function quiet(){return S.st==='w'&&Date.now()-cur()[1]>6e4}
+function blink(){const n=cur()[0]!==ls;ls=cur()[0];return n?' b':''}
+function ask(){return'<div class="ask"><span role="status">needs you</span><p>'+E(S.ask)+'</p></div>'}
+function opts(){return'<div class="ch">'+(S.opts||[]).map((o,i)=>'<button type="button" data-a="'+i+'">'+E(o)+'</button>').join('')+'</div>'}
+function stopBtn(){return stop?B('u','Undo '+stop):'<button type="button" class="k" id="x" aria-label="Stop">'+ic('x')+'</button>'}
+function queued(){return S.q?'<span class="m">queued '+S.q+'</span>'+B('now','Send now','pri'):''}
+function tapStop(){req('stop');stop=5;draw();clearInterval(sd);sd=setInterval(()=>{if(--stop<1){clearInterval(sd);draw()}else{const u=$('u');if(u)u.textContent='Undo '+stop}},1e3)}
+function undo(){req('undo');clearInterval(sd);stop=0;draw()}
+function sendNow(el){req('now',el)}
+function answer(i,el){el.classList.add('on');req('a:'+i,el)}
+function tog(){open=!open;draw()}
+const ACT={x:tapStop,u:undo,now:sendNow,row:tog,more:tog};
+v.addEventListener('click',e=>{let t=e.target;while(t&&t!==v&&!(t.dataset&&t.dataset.a!==undefined)&&!ACT[t.id])t=t.parentNode;if(!t||t===v)return;if(t.dataset&&t.dataset.a!==undefined)answer(+t.dataset.a,t);else ACT[t.id](t)});
+const BOTTOM=1;
+function draw(){const st=S.st,s=S.s||[],L=s.length;let h='<div class="board">';
+if(st==='o'){v.innerHTML='<div class="r"><span class="late" role="status">Bridge offline</span></div>';return}
+const k=Math.min(L,open?6:3),more=S.n-k;
+if(more>0)h+='<div class="l more" id="more">+'+more+'</div>';
+for(let i=L-k;i<L;i++){const last=i===L-1,lw=last&&st==='w';if(last&&st==='y')break;
+h+='<div class="l'+(last?' z':'')+'">'+(lw?'<span class="o'+blink()+'"></span>':'')+'<span class="t">'+E(s[i][0])+'</span>'+(lw?'<span class="late" id="cs" role="status"></span>':'<span class="n">'+F(dur(i))+'</span>')+'</div>'}
+h+='</div>';if(st==='y')h+=ask()+opts();
+h+='<div class="f">';
+if(st==='w'||st==='y')h+='<span class="tot" id="e"></span><span class="sp"></span>'+(st==='w'?queued()+(stop?B('u','Undo '+stop):B('x','Stop')):'');
+else h+=(st==='f'?'<span class="late" role="status">Failed</span>':'<span class="m">'+ic(st==='x'?'x':'d')+'</span>')+'<span class="tot">'+F((S.te||Date.now())-S.t0)+'</span><span class="sp"></span>';
+v.innerHTML=h+'</div>';tick()}
+function tick(){const n=Date.now(),e=$('e'),c=$('cs');if(e)e.textContent=F(n-S.t0);if(c){const z=quiet();c.textContent=z?'quiet '+M(n-cur()[1]):'';c.style.display=z?'':'none'}}
+function req(d,el){if(el)el.setAttribute('aria-busy','true');const ok=()=>{if(el)el.removeAttribute('aria-busy');draw()};if(!W.request)return ok();W.request(d).then(a=>{try{const x=JSON.parse(a&&a.result);if(x)S=x}catch(e){}ok()},()=>{if(!el){clearInterval(sd);stop=0;draw();el=$('x')}if(el){el.removeAttribute('aria-busy');el.className='err';el.textContent='Retry'}})}
+function ping(){if(!W.request||pg||!/[wyo]/.test(S.st||''))return;pg=1;W.request('s').then(a=>{pg=0;try{const x=JSON.parse(a.result);if(x)S=x}catch(e){}draw()},e=>{pg=0;if(e&&/TIMEOUT|FAILED/.test(e.code)){S.st='o';draw()}})}
+function wake(){ping()}
+if(W.onEvent)W.onEvent('chatDataChanged',()=>{rd();draw()});
+setInterval(()=>{if(W.isActive)ping()},1e4);
+rd();
+if(W.onEvent)W.onEvent('activated',wake);
+if(BOTTOM&&W.setResizeAnchor)W.setResizeAnchor('bottom');
+draw();if(W.isActive)wake();
+setInterval(tick,1e3);
+</script>
