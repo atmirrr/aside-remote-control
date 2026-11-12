@@ -24,20 +24,22 @@ const TOPIC_SEP = '_t';
 // bubble. telegram-card.html is the readable source (Hallmark stamp, line
 // breaks); Telegram limits a widget to 4096 bytes after zlib, so comments and
 // line breaks go before sending. Read once, on first use.
-const CARD_FILE = new URL('./telegram-card.html', import.meta.url);
+// telegram-queue.html is the small widget sent below a message that has to
+// wait behind a running task: "Queued" with Send now, then "Sent in".
 const CARD_LIMIT = 4096;
-let cardHtmlCache = null;
-function cardHtml() {
-  if (cardHtmlCache) return cardHtmlCache;
-  const src = fs.readFileSync(CARD_FILE, 'utf8');
-  cardHtmlCache = src
+const htmlCache = {};
+function widgetHtml(name) {
+  if (htmlCache[name]) return htmlCache[name];
+  const src = fs.readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
+  const html = src
     .replace(/<style>([\s\S]*?)<\/style>/, (_, css) => `<style>${css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n+/g, '')}</style>`)
     .replace(/>\s*\n\s*</g, '><')
     .trim();
-  const packed = zlib.deflateSync(Buffer.from(cardHtmlCache), { level: 9 }).length;
-  if (packed > CARD_LIMIT) log.warn(`task card is ${packed} bytes compressed, over Telegram's ${CARD_LIMIT}; Telegram will refuse it`);
-  return cardHtmlCache;
+  const packed = zlib.deflateSync(Buffer.from(html), { level: 9 }).length;
+  if (packed > CARD_LIMIT) log.warn(`${name} is ${packed} bytes compressed, over Telegram's ${CARD_LIMIT}; Telegram will refuse it`);
+  return (htmlCache[name] = html);
 }
+const cardHtml = () => widgetHtml('telegram-card.html');
 
 // Render the channel-agnostic [{ text, data }] button list as one row of
 // Telegram inline keyboard buttons; taps arrive as callback_query updates.
@@ -355,6 +357,27 @@ export class TelegramChannel extends Channel {
       log.warn(`[${this.id}] sendWidget refused: ${r?.description || 'no reply'}; using the text bubble`);
     } catch (e) {
       log.warn(`[${this.id}] sendWidget failed: ${e.message}; using the text bubble`);
+    }
+    return undefined;
+  }
+
+  // The queued-message widget, sent right below the message that has to wait.
+  // Returns its message id, or undefined when Telegram refuses it (the bridge
+  // then falls back to the plain "Queued" notice).
+  async sendQueueCard(chatId, state) {
+    try {
+      const r = await this.call('sendWidget', {
+        chat_id: chatId,
+        html: widgetHtml('telegram-queue.html'),
+        chat_data: state,
+        allow_queries: true,
+        disable_notification: true,
+        caption: 'Queued',
+      });
+      if (r?.ok) return r.result?.message_id;
+      log.warn(`[${this.id}] queue widget refused: ${r?.description || 'no reply'}; using the text notice`);
+    } catch (e) {
+      log.warn(`[${this.id}] queue widget failed: ${e.message}; using the text notice`);
     }
     return undefined;
   }

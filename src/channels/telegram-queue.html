@@ -1,0 +1,27 @@
+<style>
+/* Queued-message widget: sent below a message that has to wait behind a running task. Same Wayfind look as telegram-card.html. The caption carries the state (Queued, then Sent in), so the widget holds only the action, then a check. */
+:root{color-scheme:light dark;--p:#edf0f4;--i:#0a0d13;--m:#565b64;--a:#2055e1;--ai:#fcfeff;--f:#2055e1}
+@media (prefers-color-scheme:dark){:root{--p:#080b10;--i:#eff2f5;--m:#9fa5ad;--a:#457cfd;--ai:#080b10;--f:#457cfd}}
+body{margin:0;padding:12px;background:var(--p);color:var(--i);font:400 1em/1.45 ui-monospace,monospace}
+.r{display:flex;align-items:center;gap:8px;min-height:36px}
+svg{flex:none;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+button{flex:1;position:relative;min-height:36px;padding:0 12px;border:2px solid var(--a);border-radius:0;background:var(--a);color:var(--ai);font:800 .875em/1 ui-monospace,monospace;white-space:nowrap;cursor:pointer}
+button::before{content:"";position:absolute;inset:-4px}
+button:focus-visible{outline:2px solid var(--f);outline-offset:2px}
+button:active{filter:brightness(.85)}
+button[aria-busy=true]{cursor:progress}
+button[aria-busy=true]::after{content:"";position:absolute;left:0;bottom:0;width:30%;height:2px;background:currentColor;animation:ld .8s linear infinite}
+@keyframes ld{to{transform:translateX(233%)}}
+</style>
+<div class="r" id="v"></div>
+<script>
+const W=window.TelegramWidget||{},v=document.getElementById('v');let S={};
+function rd(){try{S=JSON.parse(W.chatData)||{}}catch(e){S={}}}
+function draw(){
+if(S.st==='s'){v.innerHTML='<svg viewBox="0 0 24 24" role="img" aria-label="Sent in"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';return}
+v.innerHTML='<button type="button" id="now">Send now</button>';
+const b=document.getElementById('now');b.onclick=()=>{if(!W.request)return;b.setAttribute('aria-busy','true');W.request('now').then(a=>{try{const x=JSON.parse(a&&a.result);if(x)S=x}catch(e){}draw()},()=>{b.removeAttribute('aria-busy');b.textContent='Retry'})}}
+if(W.onEvent)W.onEvent('chatDataChanged',()=>{rd();draw()});
+if(W.setResizeAnchor)W.setResizeAnchor('bottom');
+rd();draw();
+</script>

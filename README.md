@@ -121,14 +121,15 @@ While a task is running:
 
 ## Task cards (Telegram widgets)
 
-![A task card in a Telegram chat planning a weekend trip: live steps, two helper agents (flights and hotels) with their bots, a queued follow-up sent in, Stop with undo, and the answer as its own message](docs/task-card.gif)
+![A task card in a Telegram chat planning a weekend trip: live steps, two helper agents (flights and hotels) with their bots, a follow-up with its own Queued widget sent in, Stop with undo, and the answer as its own message](docs/task-card.gif)
 
 In a private chat, with `"cards": true` on the Telegram channel, each task shows as a live card (a Bot API 10.4 widget) instead of the "Thinking..." bubble:
 
 - the steps the agent has taken (its own step names), the newest at the bottom, older ones behind `+N`
 - the helper agents (subagents) the task started, up to four, each with the round bot from the Aside phone app: its eyes look around and blink while the agent works, and it rests with done, failed or stopped beside it once the agent ends. The bridge reads them from Aside's `state.db` (sessions whose `parent_id` is the task's session) with the `sqlite3` command every 4 seconds; set `agent.stateDb` if your Aside account is not `~/.aside/u/0`
 - the time so far, ticking on the phone, and `quiet 2m` once no new step has come for a minute
-- Stop, which acts after five seconds unless you tap Undo, and Send now for a message waiting behind the task
+- Stop, which acts after five seconds unless you tap Undo
+- a message you send while the task runs gets its own small widget right below it: Send now (caption `Queued`) steers it into the running task and the widget turns to a check (caption `Sent in`); if its turn comes first, the widget goes away and it runs as the next task. The widget is `src/channels/telegram-queue.html`
 - the answer, which arrives below the card as its own message (that is also the one notification; the card itself is silent)
 
 The card's HTML lives in `src/channels/telegram-card.html` (a Hallmark "Wayfind" design, light and dark with the chat theme) and must stay under Telegram's 4096 bytes after zlib; the bridge strips its comments before sending and warns in the log if it grows past the limit. The bridge writes the card's state with `editMessageWidgetData` and answers the card's requests (`s` for fresh state while it is on screen, `stop`, `undo`, `now`) through `widget_query` updates. Cards are remembered in `cards.json`, so a card whose task died with a restart is marked stopped on the next start instead of looking alive.

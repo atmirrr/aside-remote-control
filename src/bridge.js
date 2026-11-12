@@ -125,6 +125,8 @@ export class Bridge {
     // Live task cards (Telegram widgets), saved so they can be answered and
     // corrected after a restart. See cards.js.
     this.cards = new CardStore(path.join(HOME, 'cards.json'));
+    // Queue widgets by channel|chat|message: { seq, st } with st 'q' queued, 's' sent in.
+    this.queueCards = new Map();
     this.controller = new AbortController();
   }
 
@@ -419,8 +421,9 @@ export class Bridge {
   }
 
   // Keep the running card's "queued N" true whenever the queue changes.
+  // Messages that got their own queue widget are counted there, not here.
   refreshQueue(chatId) {
-    this.cardTask(chatId)?.card.queued(this.pendingFor(chatId).length);
+    this.cardTask(chatId)?.card.queued(this.pendingFor(chatId).filter((p) => !p.widget).length);
   }
 
   // A fresh card for a task that is starting. Null when Telegram refuses it:
@@ -440,6 +443,17 @@ export class Bridge {
   async handleCardQuery(channel, { chatId, messageId, data, from, fromId }) {
     if (!channel.isAuthorized(chatId)) return null;
     if (channel.isAllowedSender && !channel.isAllowedSender(chatId, fromId)) return null;
+    // A queued message's own widget: "now" sends that message into the running task.
+    const qk = `${channel.id}|${chatId}|${messageId}`;
+    const qc = this.queueCards.get(qk);
+    if (qc) {
+      const entry = this.pending.get(qc.seq);
+      if (data === 'now' && entry) {
+        const outcome = await entry.sendNow();
+        log.info(`[${channel.id}] (${from}) queue widget send-now for task ${qc.seq}: ${outcome}`);
+      }
+      return JSON.stringify({ st: qc.st });
+    }
     const task = this.activeTasks(chatId).find((t) => t.card?.messageId === messageId);
     if (!task) {
       // A card whose task already ended, or one a restart cut off.
@@ -492,6 +506,7 @@ export class Bridge {
   // channel cannot delete, strip the button by editing the text back in place.
   async dropNotice(channel, chatId, messageId) {
     if (messageId == null) return;
+    this.queueCards.delete(`${channel.id}|${chatId}|${messageId}`);
     let gone = false;
     try { gone = (await channel.deleteMessage?.(chatId, messageId)) === true; } catch {}
     if (!gone && typeof channel.editText === 'function') {
@@ -1126,7 +1141,14 @@ export class Bridge {
         fate = 'steered';
         this.pending.delete(seq);
         this.refreshQueue(chatId);
-        await this.dropNotice(channel, chatId, noticeId);
+        // A queue widget stays and says "Sent in"; a plain notice just goes.
+        const qc = noticeId != null && this.queueCards.get(`${channel.id}|${chatId}|${noticeId}`);
+        if (qc) {
+          qc.st = 's';
+          await channel.updateCard(chatId, noticeId, JSON.stringify({ st: 's' })).catch(() => {});
+          await channel.setCardCaption?.(chatId, noticeId, 'Sent in').catch(() => {});
+          setTimeout(() => this.queueCards.delete(`${channel.id}|${chatId}|${noticeId}`), 3600000).unref?.();
+        } else await this.dropNotice(channel, chatId, noticeId);
         // Files and voice notes are resolved here, the same way a task would.
         let files = [];
         let transcript = '';
@@ -1179,8 +1201,21 @@ export class Bridge {
     // the turn came while the notice was going out, it goes again at once.
     if (!claimed && this.pending.has(seq)) {
       routed({ kind: 'queued', ahead: this.queuedAhead(chatId, seq) });
-      if (this.cardTask(chatId)) {
-        // The running task's card shows the queue and carries "Send now".
+      // Next to a running card, the message gets its own small widget right
+      // below it: "Queued" with Send now. If Telegram refuses it, the card
+      // itself shows the queue and carries "Send now".
+      const wantWidget = Boolean(this.cardTask(chatId)) && typeof channel.sendQueueCard === 'function';
+      entryRef.widget = wantWidget; // counted on its widget, not on the card
+      const qcard = wantWidget
+        ? await channel.sendQueueCard(chatId, JSON.stringify({ st: 'q' })).catch(() => undefined)
+        : undefined;
+      if (qcard != null) {
+        noticeId = qcard;
+        this.queueCards.set(`${channel.id}|${chatId}|${qcard}`, { seq, st: 'q' });
+        // Its turn came (or /stop dropped it) while the widget was going out.
+        if (claimed) await this.dropNotice(channel, chatId, noticeId);
+      } else if (this.cardTask(chatId)) {
+        entryRef.widget = false;
         this.refreshQueue(chatId);
       } else {
         noticeId = await channel.sendText(chatId, QUEUE_NOTICE, {

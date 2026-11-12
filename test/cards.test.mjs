@@ -277,3 +277,56 @@ test('a card shows helper agents and writes only when they change', async () => 
   assert.equal(writes.length, 1);
   assert.deepEqual(writes[0].a, [['Helper', 'w']]);
 });
+
+function queueChannel() {
+  const ch = cardChannel();
+  ch.queueWidgets = []; ch.deleted = [];
+  ch.sendQueueCard = async (_c, state) => { const id = ++ch._mid; ch.queueWidgets.push({ id, state: JSON.parse(state) }); return id; };
+  ch.deleteMessage = async (_c, id) => { ch.deleted.push(id); return true; };
+  return ch;
+}
+
+test('a message sent while a card task runs gets its own queue widget; Send now there steers it in', async () => {
+  reset();
+  const ch = queueChannel();
+  const held = heldRun();
+  const steered = [];
+  const bridge = makeBridge(held.run, { steer: async (sid, text) => { steered.push([sid, text]); return { ok: true }; } });
+  const first = bridge.handleMessage(ch, { chatId: DM, text: 'first', from: 'u', fromId: DM });
+  await sleep(40);
+  const second = bridge.handleMessage(ch, { chatId: DM, text: 'second thought', from: 'u', fromId: DM });
+  await sleep(40);
+  assert.equal(ch.queueWidgets.length, 1);
+  assert.deepEqual(ch.queueWidgets[0].state, { st: 'q' });
+  assert.ok(!ch.sentText.includes('Queued'), 'no text notice');
+  assert.ok(!(lastState(ch)?.q), 'the task card does not count it too');
+  const wid = ch.queueWidgets[0].id;
+  assert.equal(await bridge.handleCardQuery(ch, { chatId: DM, messageId: wid, data: 's', fromId: DM, from: 'u' }), '{"st":"q"}');
+  const answer = await bridge.handleCardQuery(ch, { chatId: DM, messageId: wid, data: 'now', fromId: DM, from: 'u' });
+  assert.equal(answer, '{"st":"s"}');
+  assert.deepEqual(steered, [['ABCDEFGHIJKLMNOP', 'second thought']]);
+  assert.ok(ch.updates.some((u) => u.id === wid && u.state.st === 's'));
+  assert.ok(ch.captions.some((c) => c.id === wid && c.caption === 'Sent in'));
+  assert.ok(!ch.deleted.includes(wid), 'the widget stays, saying Sent in');
+  held.release('both done');
+  await Promise.all([first, second]);
+  assert.equal(ch.cards.length, 1, 'the steered message did not start a second task');
+});
+
+test('a queue widget goes away when its message starts on its own', async () => {
+  reset();
+  const ch = queueChannel();
+  const held = heldRun();
+  const bridge = makeBridge(held.run);
+  const first = bridge.handleMessage(ch, { chatId: DM, text: 'first', from: 'u', fromId: DM });
+  await sleep(40);
+  const second = bridge.handleMessage(ch, { chatId: DM, text: 'later', from: 'u', fromId: DM });
+  await sleep(40);
+  const wid = ch.queueWidgets[0].id;
+  held.release('first done');
+  await sleep(80);
+  assert.ok(ch.deleted.includes(wid));
+  held.release('second done');
+  await Promise.all([first, second]);
+  assert.equal(ch.cards.length, 2, 'the queued message ran as its own task with its own card');
+});
