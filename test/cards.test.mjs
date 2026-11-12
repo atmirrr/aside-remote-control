@@ -242,3 +242,38 @@ test('the Telegram channel answers every card query, with state when the bridge 
   await ch.answerCardQuery(q, async () => 'x'.repeat(2000));
   assert.deepEqual(calls.at(-1), ['answerWidgetQuery', { widget_query_id: 'q1' }], 'oversized state is not sent');
 });
+
+test('cardJson keeps the newest 4 helper agents and shortens their names', async () => {
+  const { cardJson } = await import('../src/cards.js');
+  const a = Array.from({ length: 6 }, (_, i) => [`agent ${i} `.padEnd(80, 'x'), i % 2 ? 'w' : 'd']);
+  const out = JSON.parse(cardJson({ st: 'w', t0: 1, n: 0, q: 0, s: [], a }));
+  assert.equal(out.a.length, 4);
+  assert.equal(out.a[0][0].startsWith('agent 2'), true);
+  assert.ok(out.a.every(([t]) => t.length <= 40));
+});
+
+test('readAgents lists a session\'s subagents active since the task began', async () => {
+  const { readAgents } = await import('../src/cards.js');
+  const { execFileSync } = await import('node:child_process');
+  const os = await import('node:os'); const path = await import('node:path'); const fs = await import('node:fs');
+  const db = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ar-db-')), 'state.db');
+  execFileSync('sqlite3', [db, `create table sessions (id text, parent_id text, title text, status text, created_at int, updated_at int);
+    insert into sessions values ('kid1kid1kid1kid1','PARENTPARENT0001','Old helper','idle',100,100),
+    ('kid2kid2kid2kid2','PARENTPARENT0001','Compare prices','running',2000,2001),
+    ('kid3kid3kid3kid3','PARENTPARENT0001','New Session','errored',2002,2003),
+    ('kid4kid4kid4kid4','OTHEROTHEROTHER1','Not ours','running',2000,2001);`]);
+  assert.deepEqual(await readAgents('PARENTPARENT0001', 2000 * 1000, db), [['Compare prices', 'w'], ['Agent', 'f']]);
+  assert.equal(await readAgents("x' or 1=1 --", 0, db), null);
+});
+
+test('a card shows helper agents and writes only when they change', async () => {
+  const { TaskCard } = await import('../src/cards.js');
+  const writes = [];
+  const card = new TaskCard({ channel: { id: 'c', updateCard: async (_c, _m, j) => writes.push(JSON.parse(j)) }, chatId: 1, messageId: 2,
+    state: { st: 'w', t0: 0, n: 0, q: 0, s: [] }, store: { set() {} }, minGapMs: 0 });
+  card.agents([['Helper', 'w']]);
+  card.agents([['Helper', 'w']]);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].a, [['Helper', 'w']]);
+});

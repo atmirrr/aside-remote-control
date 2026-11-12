@@ -46,6 +46,12 @@ button[aria-busy=true]::after{content:"";position:absolute;left:0;bottom:0;width
 .board+.ask{margin-top:var(--space-sm)}
 .f{margin-top:var(--space-xs)}
 .tot{font-weight:800}
+/* helper agents: the round bot of the Aside phone app, eyes looking around while it works */
+.ag{margin-top:var(--space-xs)}
+.ag .r{min-height:30px}
+.bot{flex:none;width:22px;height:22px}
+.bot circle{fill:var(--color-ink)}
+.bot rect{fill:var(--color-paper)}
 </style>
 <div id="v"><div class="r"><span class="t">Working</span></div></div>
 <script>
@@ -61,6 +67,10 @@ function rd(){try{S=JSON.parse(W.chatData)||{}}catch(e){S={}}}
 function cur(){const s=S.s||[];return s.length?s[s.length-1]:['',S.t0||Date.now()]}
 function quiet(){return S.st==='w'&&Date.now()-cur()[1]>6e4}
 function blink(){const n=cur()[0]!==ls;ls=cur()[0];return n?' b':''}
+const BOT={},K=t=>{let h=0;for(const c of t)h=h*31+c.charCodeAt(0)>>>0;return h};
+function ags(st){const a=S.a||[];return a.length?'<div class="ag">'+a.map((x,i)=>{const w=x[1]==='w'&&st==='w';return'<div class="r"><svg class="bot" viewBox="-12 -12 24 24" data-k="'+i+E(x[0])+'" data-s="'+(w?'w':x[1])+'"><circle r="10"/><g><rect x="-5.6" y="-3.2" width="4.2" height="6.4" rx="2.1"/><rect x="1.4" y="-3.2" width="4.2" height="6.4" rx="2.1"/></g></svg><span class="t">'+E(x[0])+'</span>'+(w?'':'<span class="m">'+({d:'done',f:'failed',x:'stopped'}[x[1]]||'')+'</span>')+'</div>'}).join('')+'</div>':''}
+function pose(e,x,y,q){e.children[0].setAttribute('transform','translate('+x/4+' '+y/4+')');e.children[1].setAttribute('transform','translate('+x+' '+y+') scale(1 '+q+')')}
+function anim(){const n=Date.now();v.querySelectorAll('.bot').forEach(e=>{const k=e.dataset.k,s=e.dataset.s,h=K(k);if(s!=='w')return pose(e,s==='f'?0:h%7-3,s==='f'?3:(h>>3)%5-2,s==='f'?.6:1);const b=BOT[k]||(BOT[k]={x:0,y:0,tx:0,ty:0,nt:0,bt:n+1e3+h%3e3});if(n>b.nt){b.tx=Math.random()*7-3.5;b.ty=Math.random()*6-3;b.nt=n+400+Math.random()*1100}b.x+=(b.tx-b.x)*.25;b.y+=(b.ty-b.y)*.25;let q=1;if(n>b.bt){q=.15;if(n>b.bt+140)b.bt=n+2500+Math.random()*3e3}pose(e,b.x,b.y,q)});requestAnimationFrame(anim)}
 function ask(){return'<div class="ask"><span role="status">needs you</span><p>'+E(S.ask)+'</p></div>'}
 function opts(){return'<div class="ch">'+(S.opts||[]).map((o,i)=>'<button type="button" data-a="'+i+'">'+E(o)+'</button>').join('')+'</div>'}
 function stopBtn(){return stop?B('u','Undo '+stop):'<button type="button" class="k" id="x" aria-label="Stop">'+ic('x')+'</button>'}
@@ -79,7 +89,7 @@ const k=Math.min(L,open?6:3),more=S.n-k;
 if(more>0)h+='<div class="l more" id="more">+'+more+'</div>';
 for(let i=L-k;i<L;i++){const last=i===L-1,lw=last&&st==='w';if(last&&st==='y')break;
 h+='<div class="l'+(last?' z':'')+'">'+(lw?'<span class="o'+blink()+'"></span>':'')+'<span class="t">'+E(s[i][0])+'</span>'+(lw?'<span class="late" id="cs" role="status"></span>':'')+'</div>'}
-h+='</div>';if(st==='y')h+=ask()+opts();
+h+='</div>'+ags(st);if(st==='y')h+=ask()+opts();
 h+='<div class="f">';
 if(st==='w'||st==='y')h+='<span class="tot" id="e"></span><span class="sp"></span>'+(st==='w'?queued()+(stop?B('u','Undo '+stop):B('x','Stop')):'');
 else h+=(st==='f'?'<span class="late" role="status">Failed</span>':'<span class="m">'+ic(st==='x'?'x':'d')+'</span>')+'<span class="tot">'+F((S.te||Date.now())-S.t0)+'</span><span class="sp"></span>';
@@ -94,5 +104,5 @@ rd();
 if(W.onEvent)W.onEvent('activated',wake);
 if(BOTTOM&&W.setResizeAnchor)W.setResizeAnchor('bottom');
 draw();if(W.isActive)wake();
-setInterval(tick,1e3);
+setInterval(tick,1e3);requestAnimationFrame(anim);
 </script>

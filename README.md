@@ -126,6 +126,7 @@ While a task is running:
 In a private chat, with `"cards": true` on the Telegram channel, each task shows as a live card (a Bot API 10.4 widget) instead of the "Thinking..." bubble:
 
 - the steps the agent has taken (its own step names), the newest at the bottom, older ones behind `+N`
+- the helper agents (subagents) the task started, up to four, each with the round bot from the Aside phone app: its eyes look around and blink while the agent works, and it rests with done, failed or stopped beside it once the agent ends. The bridge reads them from Aside's `state.db` (sessions whose `parent_id` is the task's session) with the `sqlite3` command every 4 seconds; set `agent.stateDb` if your Aside account is not `~/.aside/u/0`
 - the time so far, ticking on the phone, and `quiet 2m` once no new step has come for a minute
 - Stop, which acts after five seconds unless you tap Undo, and Send now for a message waiting behind the task
 - the answer, which arrives below the card as its own message (that is also the one notification; the card itself is silent)

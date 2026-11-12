@@ -13,12 +13,19 @@
 //   t0  start, ms since epoch       te  end, ms (finished cards only)
 //   n   steps so far                q   messages waiting behind this task
 //   s   the newest steps, oldest first: [[title, startedAtMs], ...]
+//   a   helper agents (subagents) the task started, oldest first: [[title, st], ...]
+//       with st 'w' working · 'd' done · 'f' failed · 'x' stopped
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { cleanTerminalOutput, log } from './util.js';
 
 // Telegram refuses state over 1024 bytes; stay clear of it.
 const MAX_STATE_BYTES = 1000;
 const KEEP_STEPS = 6;
+const KEEP_AGENTS = 4;
+const AGENT_TITLE = 40;
 const MAX_TITLE = 60;
 // How long a finished or abandoned card is remembered, by count.
 const KEEP_CARDS = 30;
@@ -27,6 +34,7 @@ const KEEP_CARDS = 30;
 // titles, until it fits; the card shows "+N" for steps it no longer has.
 export function cardJson(state) {
   const s = { ...state, s: (state.s || []).slice(-KEEP_STEPS) };
+  if (state.a) s.a = state.a.slice(-KEEP_AGENTS).map(([t, st]) => [String(t).slice(0, AGENT_TITLE), st]);
   let out = JSON.stringify(s);
   while (Buffer.byteLength(out) > MAX_STATE_BYTES && s.s.length > 1) {
     s.s = s.s.slice(1);
@@ -34,9 +42,31 @@ export function cardJson(state) {
   }
   if (Buffer.byteLength(out) > MAX_STATE_BYTES) {
     s.s = s.s.map(([t, at]) => [String(t).slice(0, 24), at]);
+    if (s.a) s.a = s.a.map(([t, st]) => [String(t).slice(0, 20), st]);
     out = JSON.stringify(s);
   }
   return out;
+}
+
+// Helper agents: Aside records a subagent as a session whose parent_id is the
+// session that spawned it, in the account's state.db. The bridge's Node has no
+// SQLite, so this asks the sqlite3 command (read-only). Only agents active since
+// the task started count, so a resumed chat doesn't show its old ones.
+export const STATE_DB = path.join(os.homedir(), '.aside', 'u', '0', 'state.db');
+const SESSION_ID = /^[A-Za-z0-9]{16}$/;
+const AGENT_ST = { running: 'w', idle: 'd', errored: 'f', aborted: 'x', interrupted: 'x' };
+export function readAgents(parentId, sinceMs, db = STATE_DB) {
+  return new Promise((resolve) => {
+    if (!SESSION_ID.test(parentId || '') || !fs.existsSync(db)) return resolve(null);
+    const q = `select title, status from sessions where parent_id = '${parentId}' and updated_at >= ${Math.floor(sinceMs / 1000) - 5} order by created_at`;
+    execFile('sqlite3', ['-readonly', '-json', db, q], { timeout: 5000 }, (err, out) => {
+      if (err) return resolve(null);
+      try {
+        const rows = String(out).trim() ? JSON.parse(out) : [];
+        resolve(rows.map((r) => [!r.title || r.title === 'New Session' ? 'Agent' : String(r.title), AGENT_ST[r.status] || 'w']));
+      } catch { resolve(null); }
+    });
+  });
 }
 
 // The agent's own name for a step, from one line of its terminal output.
@@ -143,6 +173,26 @@ export class TaskCard {
     this.schedule();
   }
 
+  // The helper agents as readAgents lists them; a write only when they change.
+  agents(list) {
+    if (this.done || !list) return;
+    const a = list.slice(-KEEP_AGENTS);
+    if (JSON.stringify(a) === JSON.stringify(this.state.a || [])) return;
+    this.state.a = a;
+    this.schedule();
+  }
+
+  // Look for helper agents every few seconds while the task runs. sessionId()
+  // returns the task's session id once the CLI has announced it.
+  watchAgents(sessionId, { everyMs = 4000, db } = {}) {
+    this.agentPoll = async () => {
+      const id = sessionId();
+      if (id) this.agents(await readAgents(id, this.state.t0, db));
+    };
+    this.agentTimer = setInterval(() => { this.agentPoll().catch(() => {}); }, everyMs);
+    this.agentTimer.unref?.();
+  }
+
   queued(n) {
     if (this.done || this.state.q === n) return;
     this.state.q = n;
@@ -164,6 +214,9 @@ export class TaskCard {
 
   // st: 'd' done, 'x' stopped, 'f' failed. The last write, plus the caption.
   async finish(st) {
+    if (this.done) return;
+    clearInterval(this.agentTimer);
+    if (this.agentPoll) await this.agentPoll().catch(() => {}); // the agents' last states
     if (this.done) return;
     this.done = true;
     clearTimeout(this.timer);

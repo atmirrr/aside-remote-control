@@ -83,9 +83,9 @@ const HELP = [
   'want out, or ignore it and let the task finish.',
   '',
   'In a private chat with an up-to-date Telegram app, a task shows as a live',
-  'card instead: its steps and how long each took, the time so far, Stop (with',
-  'five seconds to undo) and Send now for a message waiting behind it. The',
-  'answer arrives below the card as its own message.',
+  'card instead: its steps, any helper agents it started, the time so far,',
+  'Stop (with five seconds to undo) and Send now for a message waiting behind',
+  'it. The answer arrives below the card as its own message.',
   '',
   'Or prefix it: "/btw <task>" skips the queue and runs straight away, next to',
   'whatever is already going.',
@@ -761,6 +761,7 @@ export class Bridge {
         // refusal) keeps the bubble.
         if (channel.wantsPlaceholder !== false && typeof channel.sendCard === 'function' && channel.cardsFor?.(chatId) === true) {
           entry.card = await this.openCard(channel, chatId, started);
+          entry.card?.watchAgents(() => entry.sessionId, { db: this.config.agent?.stateDb });
         }
         if (!entry.card) {
           msgId = channel.wantsPlaceholder === false
