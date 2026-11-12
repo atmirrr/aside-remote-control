@@ -121,7 +121,7 @@ While a task is running:
 
 ## Task cards (Telegram widgets)
 
-![A task card in a Telegram chat: live steps, a queued follow-up sent in, Stop with undo, two helper agents with their bots, and the answer as its own message](docs/task-card.gif)
+![A task card in a Telegram chat planning a weekend trip: live steps, two helper agents (flights and hotels) with their bots, a queued follow-up sent in, Stop with undo, and the answer as its own message](docs/task-card.gif)
 
 In a private chat, with `"cards": true` on the Telegram channel, each task shows as a live card (a Bot API 10.4 widget) instead of the "Thinking..." bubble:
 
