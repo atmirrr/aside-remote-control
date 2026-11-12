@@ -121,11 +121,11 @@ While a task is running:
 
 ## Task cards (Telegram widgets)
 
-![A task card in a Telegram chat: live steps with their times, a queued follow-up sent in, Stop with undo, and the answer as its own message](docs/task-card.gif)
+![A task card in a Telegram chat: live steps, a queued follow-up sent in, Stop with undo, and the answer as its own message](docs/task-card.gif)
 
 In a private chat, with `"cards": true` on the Telegram channel, each task shows as a live card (a Bot API 10.4 widget) instead of the "Thinking..." bubble:
 
-- the steps the agent has taken (its own step names) with how long each took, the newest at the bottom, older ones behind `+N`
+- the steps the agent has taken (its own step names), the newest at the bottom, older ones behind `+N`
 - the time so far, ticking on the phone, and `quiet 2m` once no new step has come for a minute
 - Stop, which acts after five seconds unless you tap Undo, and Send now for a message waiting behind the task
 - the answer, which arrives below the card as its own message (that is also the one notification; the card itself is silent)

@@ -42,7 +42,6 @@ button[aria-busy=true]::after{content:"";position:absolute;left:0;bottom:0;width
 .l{display:flex;align-items:center;gap:var(--space-xs);min-height:34px;color:var(--color-plate-muted);border-top:var(--rule-hair) solid var(--color-plate-rule)}
 .l:first-child{border-top:0}
 .l.z{color:var(--color-plate-ink)}
-.n{flex:none;font-weight:800;color:var(--color-accent-2)}
 .more{min-height:26px;font-size:var(--text-sm)}
 .board+.ask{margin-top:var(--space-sm)}
 .f{margin-top:var(--space-xs)}
@@ -60,7 +59,6 @@ const B=(id,t,c)=>'<button type="button" id="'+id+'"'+(c?' class="'+c+'"':'')+'>
 let S={},open=0,stop=0,sd=0,pg=0,ls='';
 function rd(){try{S=JSON.parse(W.chatData)||{}}catch(e){S={}}}
 function cur(){const s=S.s||[];return s.length?s[s.length-1]:['',S.t0||Date.now()]}
-function dur(i){const a=S.s[i],b=S.s[i+1];return(b?b[1]:S.te||Date.now())-a[1]}
 function quiet(){return S.st==='w'&&Date.now()-cur()[1]>6e4}
 function blink(){const n=cur()[0]!==ls;ls=cur()[0];return n?' b':''}
 function ask(){return'<div class="ask"><span role="status">needs you</span><p>'+E(S.ask)+'</p></div>'}
@@ -80,7 +78,7 @@ if(st==='o'){v.innerHTML='<div class="r"><span class="late" role="status">Bridge
 const k=Math.min(L,open?6:3),more=S.n-k;
 if(more>0)h+='<div class="l more" id="more">+'+more+'</div>';
 for(let i=L-k;i<L;i++){const last=i===L-1,lw=last&&st==='w';if(last&&st==='y')break;
-h+='<div class="l'+(last?' z':'')+'">'+(lw?'<span class="o'+blink()+'"></span>':'')+'<span class="t">'+E(s[i][0])+'</span>'+(lw?'<span class="late" id="cs" role="status"></span>':'<span class="n">'+F(dur(i))+'</span>')+'</div>'}
+h+='<div class="l'+(last?' z':'')+'">'+(lw?'<span class="o'+blink()+'"></span>':'')+'<span class="t">'+E(s[i][0])+'</span>'+(lw?'<span class="late" id="cs" role="status"></span>':'')+'</div>'}
 h+='</div>';if(st==='y')h+=ask()+opts();
 h+='<div class="f">';
 if(st==='w'||st==='y')h+='<span class="tot" id="e"></span><span class="sp"></span>'+(st==='w'?queued()+(stop?B('u','Undo '+stop):B('x','Stop')):'');
