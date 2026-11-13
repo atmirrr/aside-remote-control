@@ -2,7 +2,9 @@
 
 Remote-control your [Aside](https://aside.com) browser agent from chat apps. Send a message, the agent runs it as a full task in your local browser, and replies in the chat. **Telegram** is built in; other platforms plug in as channel modules.
 
-https://github.com/user-attachments/assets/9848fee6-ec1f-4e8d-b71b-52be9151b40d
+<p align="center">
+  <img src="docs/task-card.gif" alt="A task card in a Telegram chat planning a weekend trip: live steps, two helper agents (flights and hotels), a follow-up sent into the running task, Stop with undo, and the answer as its own message">
+</p>
 
 - Zero runtime dependencies (Node 18+ standard library only). No webhook, no public URL, no hosted backend: pure long-polling.
 - Real sessions: each chat is one Aside session, so follow-ups ("the second one") just work. `/new` starts over.
@@ -80,7 +82,7 @@ Nothing is killed automatically. If a task runs past 30 minutes, or prints nothi
 
 ## Task cards (Telegram widgets)
 
-With `"cards": true` on the Telegram channel, each task in a private chat shows as the live card in the video above (a Bot API 10.4 widget) instead of a "Thinking..." bubble:
+With `"cards": true` on the Telegram channel, each task in a private chat shows as the live card in the GIF above (a Bot API 10.4 widget) instead of a "Thinking..." bubble:
 
 - the agent's steps, newest at the bottom
 - up to four helper agents (subagents) the task started, each with a small bot that shows done, failed or stopped when it ends
